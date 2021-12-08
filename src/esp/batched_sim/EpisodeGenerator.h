@@ -6,6 +6,8 @@
 #define ESP_BATCHEDSIM_EPISODEGENERATOR_H_
 
 #include "esp/batched_sim/EpisodeSet.h"
+#include "esp/core/esp.h"
+#include "esp/batched_sim/configure.h"
 
 namespace esp {
 namespace batched_sim {
@@ -24,7 +26,9 @@ struct EpisodeGeneratorConfig {
 };
 
 EpisodeSet generateBenchmarkEpisodeSet(const EpisodeGeneratorConfig& config,
+                                       #ifndef MAGNUM_RENDERER
                                        const BpsSceneMapping& sceneMapping,
+                                       #endif
                                        const serialize::Collection& collection);
 
 }  // namespace batched_sim

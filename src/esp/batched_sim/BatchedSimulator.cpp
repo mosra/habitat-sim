@@ -3,35 +3,50 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "BatchedSimulator.h"
+#ifndef MAGNUM_RENDERER
 #include "esp/batched_sim/BatchedSimAssert.h"
+#endif
 #include "esp/batched_sim/GlmUtils.h"
 #include "esp/batched_sim/PlacementHelper.h"
 #include "esp/batched_sim/ProfilingScope.h"
 
 #include "esp/gfx/replay/Keyframe.h"
 #include "esp/io/json.h"
-
+#ifndef MAGNUM_RENDERER
 // #include <bps3D.hpp>
+#endif
 
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 
 #include <mutex>
+#include <Corrade/Containers/Pair.h>
 
 #ifndef NDEBUG
 #define ENABLE_DEBUG_INSTANCES
 #endif
 
+#ifdef MAGNUM_RENDERER
+#include <Magnum/BulletIntegration/Integration.h>
+#endif
+
 namespace esp {
 namespace batched_sim {
 
+#ifdef MAGNUM_RENDERER
+using namespace Cr::Containers::Literals;
+using namespace Mn::Math::Literals;
+#endif
+
 namespace {
 
-static Mn::Vector3 INVALID_VEC3 = Mn::Vector3(NAN, NAN, NAN);
+#ifndef MAGNUM_RENDERER
+static Mn::Vector3 INVALID_VEC3 = Mn::Vector3{Mn::Constants::nan()};
 
 static constexpr glm::mat4x3 identityGlMat_ =
     glm::mat4x3(1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f);
+#endif
 
 float remapAction(float action, float stepMin, float stepMax) {
   // map (-1..+1) to (stepMin..stepMax) and clamp
@@ -40,6 +55,7 @@ float remapAction(float action, float stepMin, float stepMax) {
   return Mn::Math::lerp(stepMin, stepMax, clampedNormalizedAction);
 }
 
+#ifndef MAGNUM_RENDERER
 Mn::Vector3 toMagnumVector3(const btVector3& src) {
   return {src.x(), src.y(), src.z()};
 }
@@ -53,6 +69,7 @@ Mn::Matrix4 toMagnumMatrix4(const btTransform& btTrans) {
   Mn::Matrix4 tmp2{btTrans};
   return tmp2;
 }
+#endif
 
 Mn::Vector3 groundPositionToVector3(const Mn::Vector2& src) {
   constexpr float groundY = 0.f;
@@ -61,24 +78,26 @@ Mn::Vector3 groundPositionToVector3(const Mn::Vector2& src) {
 
 std::string getMeshNameFromURDFVisualFilepath(const std::string& filepath) {
   // "../meshes/base_link.dae" => "base_link"
-  auto index0 = filepath.rfind('/');
-  if (index0 == -1) {
-    // this is okay; the substring will start at 0
-  }
-  auto index1 = filepath.rfind('.');
-  BATCHED_SIM_ASSERT(index1 != -1);
-
-  auto retval = filepath.substr(index0 + 1, index1 - index0 - 1);
-  return retval;
+  return Cr::Utility::Path::splitExtension(Cr::Utility::Path::split(filepath).second()).first();
 }
 
 }  // namespace
 
 RobotInstanceSet::RobotInstanceSet(Robot* robot,
                                    const BatchedSimulatorConfig* config,
+                                   #ifdef MAGNUM_RENDERER
+                                   MagnumRendererStandalone& renderer,
+                                   #else
                                    std::vector<bps3D::Environment>* envs,
+                                   #endif
                                    RolloutRecord* rollouts)
-    : config_(config), envs_(envs), robot_(robot), rollouts_(rollouts) {
+    : config_(config),
+      #ifdef MAGNUM_RENDERER
+      renderer_{&renderer},
+      #else
+      envs_(envs),
+      #endif
+      robot_(robot), rollouts_(rollouts) {
   const int numLinks = robot->artObj->getNumLinks();
   const int numNodes = numLinks + 1;  // include base
   const int numEnvs = config_->numEnvs;
@@ -94,7 +113,9 @@ RobotInstanceSet::RobotInstanceSet(Robot* robot,
 
   int baseInstanceIndex = 0;
   for (int b = 0; b < numEnvs; b++) {
+    #ifndef MAGNUM_RENDERER
     auto& env = (*envs_)[b];
+    #endif
 
     // sloppy: pass -1 to getLinkVisualSceneNodes to get base
     for (int i = -1; i < numLinks; i++) {
@@ -107,14 +128,21 @@ RobotInstanceSet::RobotInstanceSet(Robot* robot,
       int instanceId = -1;
       if (!visualAttachments.empty()) {
         const std::string linkVisualFilepath = visualAttachments[0].second;
+
+        #ifdef MAGNUM_RENDERER
+        if(i != -1) // TODO ?!
+          // TODO why the heck is this stil treating meshes and materials
+          //  separate?!
+          instanceId = renderer.add(b, visualAttachments[0].second);
+        #else
         const std::string nodeName =
             getMeshNameFromURDFVisualFilepath(linkVisualFilepath);
         auto instanceBlueprint =
             robot_->sceneMapping_->findInstanceBlueprint(nodeName);
-
         instanceId =
             env.addInstance(instanceBlueprint.meshIdx_,
                             instanceBlueprint.mtrlIdx_, identityGlMat_);
+        #endif
       } else {
         // these are camera links
         // sloppy: we should avoid having these items in the nodeInstanceIds_
@@ -220,7 +248,12 @@ void BatchedSimulator::updateLinkTransforms(int currRolloutSubstep,
 
     mb->forwardKinematics(robots_.scratch_q_, robots_.scratch_m_);
 
+    #ifdef MAGNUM_RENDERER
+// TODO wtf!! where is this used
+//     Cr::Containers::StridedArrayView1D<Mn::Matrix4> environmentTransforms = renderer_->transformations(b);
+    #else
     auto& env = bpsWrapper_->envs_[b];
+    #endif
     int baseInstanceIndex = b * numNodes;
     const int baseSphereIndex = b * robots_.robot_->numCollisionSpheres_;
 
@@ -247,7 +280,13 @@ void BatchedSimulator::updateLinkTransforms(int currRolloutSubstep,
         // todo: avoid btTransform copy for case of i != -1
         const auto btTrans = i == -1 ? mb->getBaseWorldTransform()
                                      : mb->getLink(i).m_cachedWorldTransform;
-        Mn::Matrix4 mat = toMagnumMatrix4(btTrans);
+        Mn::Matrix4 mat =
+          #ifdef MAGNUM_RENDERER
+          Mn::Matrix4{btTrans}
+          #else
+          toMagnumMatrix4(btTrans)
+          #endif
+        ;
 
         auto tmp = robots_.robot_->nodeTransformFixups[nodeIndex];
         // auto vec = tmp[3];
@@ -255,9 +294,13 @@ void BatchedSimulator::updateLinkTransforms(int currRolloutSubstep,
         // tmp[3] = Mn::Vector4(vec.xyz() * scale, 1.f);
         mat = mat * tmp;
 
+//         #ifdef MAGNUM_RENDERER
+//         environmentTransforms[instanceId] = mat; // TODO where is this gone?!
+//         #else
         if (robots_.robot_->gripperLink_ == i) {
           robotInstance.cachedGripperLinkMat_ = mat;
         }
+//         #endif
 
         if (updateForPhysics) {
           // perf todo: loop through collision spheres (and look up link id),
@@ -441,7 +484,9 @@ void BatchedSimulator::updateGripping() {
       continue;
     }
 
+    #ifndef MAGNUM_RENDERER
     auto& env = bpsWrapper_->envs_[b];
+    #endif
     auto& robotInstance = robots_.robotInstances_[b];
     auto& envState = safeVectorGet(pythonEnvStates_, b);
 
@@ -747,7 +792,9 @@ void BatchedSimulator::updateCollision() {
         safeVectorGet(episodeSet_.episodes_, episodeInstance.episodeIndex_);
     const int baseSphereIndex = b * robot_.numCollisionSpheres_;
     bool hit = false;
+    #ifndef MAGNUM_RENDERER
     auto& env = bpsWrapper_->envs_[b];
+    #endif
     const auto& robotInstance = robots_.robotInstances_[b];
 
     // perf todo: if there was a hit last frame, cache that sphere and test it
@@ -938,7 +985,9 @@ void BatchedSimulator::updateRenderInstances(bool forceUpdate) {
 
   for (int b = 0; b < numEnvs; b++) {
     auto& robotInstance = robots_.robotInstances_[b];
+    #ifndef MAGNUM_RENDERER
     auto& env = bpsWrapper_->envs_[b];
+    #endif
 
     // temp hack: we don't currently have bookeeping to know if a robot moved
     // over several substeps, so we assume it did here. perf todo: fix this
@@ -962,9 +1011,13 @@ void BatchedSimulator::updateRenderInstances(bool forceUpdate) {
           continue;
         }
 
+        #ifdef MAGNUM_RENDERER
+        renderer_->transformations(b)[instanceId] = safeVectorGet(robots_.nodeNewTransforms_, instanceIndex);
+        #else
         const auto glMat = toGlmMat4x3(
             safeVectorGet(robots_.nodeNewTransforms_, instanceIndex));
         env.updateInstanceTransform(instanceId, glMat);
+        #endif
       }
     }
 
@@ -972,9 +1025,13 @@ void BatchedSimulator::updateRenderInstances(bool forceUpdate) {
     if (didRobotMove && robotInstance.grippedFreeObjectIndex_ != -1) {
       int freeObjectIndex = robotInstance.grippedFreeObjectIndex_;
       auto mat = getHeldObjectTransform(b);
-      glm::mat4x3 glMat = toGlmMat4x3(mat);
       int instanceId = getFreeObjectBpsInstanceId(b, freeObjectIndex);
+      #ifdef MAGNUM_RENDERER
+      renderer_->transformations(b)[instanceId] = mat;
+      #else
+      glm::mat4x3 glMat = toGlmMat4x3(mat);
       env.updateInstanceTransform(instanceId, glMat);
+      #endif
 
       auto& envState = safeVectorGet(pythonEnvStates_, b);
       safeVectorGet(envState.obj_positions, freeObjectIndex) =
@@ -1112,8 +1169,11 @@ Mn::Matrix4 BatchedSimulator::getHeldObjectTransform(int b) const {
 }
 
 Robot::Robot(const serialize::Collection& serializeCollection,
-             esp::sim::Simulator* sim,
-             BpsSceneMapping* sceneMapping) {
+             esp::sim::Simulator* sim
+             #ifndef MAGNUM_RENDERER
+             , BpsSceneMapping* sceneMapping
+            #endif
+             ) {
   ESP_CHECK(!serializeCollection.robots.empty(),
             "no robot found in collection.json");
   const serialize::Robot& serializeRobot = serializeCollection.robots.front();
@@ -1124,7 +1184,9 @@ Robot::Robot(const serialize::Collection& serializeCollection,
       sim->getArticulatedObjectManager()->addBulletArticulatedObjectFromURDF(
           filepath);
 
+  #ifndef MAGNUM_RENDERER
   sceneMapping_ = sceneMapping;
+  #endif
 
   artObj = static_cast<esp::physics::BulletArticulatedObject*>(
       managedObj->hackGetBulletObjectReference().get());
@@ -1252,6 +1314,7 @@ void Robot::updateFromSerializeCollection(
   numCollisionSpheres_ = numCollisionSpheres;
 }
 
+#ifndef MAGNUM_RENDERER
 BpsWrapper::BpsWrapper(int gpuId,
                        int numEnvs,
                        bool includeDepth,
@@ -1301,6 +1364,7 @@ BpsWrapper::~BpsWrapper() {
   loader_ = nullptr;
   renderer_ = nullptr;
 }
+#endif
 
 BatchedSimulator::BatchedSimulator(const BatchedSimulatorConfig& config) {
   ESP_CHECK(config.numDebugEnvs <= config.numEnvs,
@@ -1309,23 +1373,47 @@ BatchedSimulator::BatchedSimulator(const BatchedSimulatorConfig& config) {
   config_ = config;
   const int numEnvs = config_.numEnvs;
 
+  #ifndef MAGNUM_RENDERER /* BpsImporter handles this */
   const std::string sceneMappingFilepath =
       config_.renderAssetCompositeFilepath + ".mapping.json";
   sceneMapping_ = BpsSceneMapping::loadFromFile(sceneMappingFilepath);
+  #endif
 
   serializeCollection_ =
       serialize::Collection::loadFromFile(config_.collectionFilepath);
 
+  #ifdef MAGNUM_RENDERER
+  renderer_.emplace(MagnumRendererConfiguration{}
+//     .setFilename("combined_Stage_v3_sc0_staging_trimesh.bps"_s)
+    .setTileSizeCount({config_.sensor0.width, config_.sensor0.height},
+                      // TODO better way to specify this
+                      {16, (config_.numEnvs + 15)/16})
+  );
+  // TODO GPU ID, if include depth/color
+  renderer_->addFile(config_.renderAssetCompositeFilepath);
+//   #ifdef MAGNUM_RENDERER
+//   /* Hardcode camera position + projection for all views (taken from
+//      BpsWrapper) */
+//   for(Mn::Matrix4& projection: renderer_->cameras()) projection =
+//     Mn::Matrix4::perspectiveProjection(Mn::Deg(config_.sensor0.hfov), Mn::Vector2{Mn::Float(config_.sensor0.width), Mn::Float(config_.sensor0.height)}.aspectRatio(), 0.01f, 1000.0f)*
+//     (Mn::Matrix4::from(Mn::Quaternion{{0.0f, -0.529178f, 0.0f}, 0.848511f}.toMatrix(), {-1.61004f, 1.5f, 3.5455f}).inverted());
+//   #endif
+  #else
   bpsWrapper_ = std::make_unique<BpsWrapper>(
       config_.gpuId, config_.numEnvs, config_.includeDepth,
       config_.includeColor, config_.sensor0,
       config_.renderAssetCompositeFilepath);
+  #endif
   if (config_.numDebugEnvs > 0) {
+    #ifdef MAGNUM_RENDERER
+    CORRADE_INTERNAL_ASSERT_UNREACHABLE();
+    #else
     // perf todo: separate renderAssetsComposite for debug models
     debugBpsWrapper_ = std::make_unique<BpsWrapper>(
         config_.gpuId, config_.numDebugEnvs,
         /*includeDepth*/ false, /*includeColor*/ true, config_.debugSensor,
         config_.renderAssetCompositeFilepath);
+    #endif
   }
 
   if (config_.numDebugEnvs > 0) {
@@ -1344,15 +1432,24 @@ BatchedSimulator::BatchedSimulator(const BatchedSimulatorConfig& config) {
 
   legacySim_ = esp::sim::Simulator::create_unique(simConfig);
 
-  robot_ = Robot(serializeCollection_, legacySim_.get(), &sceneMapping_);
+  robot_ = Robot(serializeCollection_, legacySim_.get()
+    #ifndef MAGNUM_RENDERER
+    , &sceneMapping_
+    #endif
+  );
 
   checkDisableRobotAndFreeObjectsCollision();
 
   int numLinks = robot_.artObj->getNumLinks();
   int numNodes = numLinks + 1;  // include base
 
-  robots_ =
-      RobotInstanceSet(&robot_, &config_, &bpsWrapper_->envs_, &rollouts_);
+  robots_ = RobotInstanceSet(&robot_, &config_,
+    #ifdef MAGNUM_RENDERER
+    *renderer_,
+    #else
+    &bpsWrapper_->envs_,
+    #endif
+    &rollouts_);
 
   actionDim_ = getNumActions();
 
@@ -1411,6 +1508,7 @@ int BatchedSimulator::getNumActions() const {
   return serializeCollection_.robots[0].actionMap.numActions;
 }
 
+#ifndef MAGNUM_RENDERER
 bps3D::Environment& BatchedSimulator::getBpsEnvironment(int envIndex) {
   BATCHED_SIM_ASSERT(envIndex < config_.numEnvs);
   return bpsWrapper_->envs_[envIndex];
@@ -1421,6 +1519,7 @@ bps3D::Environment& BatchedSimulator::getDebugBpsEnvironment(int envIndex) {
   BATCHED_SIM_ASSERT(envIndex < config_.numDebugEnvs);
   return debugBpsWrapper_->envs_[envIndex];
 }
+#endif
 
 // one-time init for envs
 void BatchedSimulator::initEpisodeInstances() {
@@ -1449,7 +1548,9 @@ void BatchedSimulator::initEpisodeInstances() {
 }
 
 void BatchedSimulator::clearEpisodeInstance(int b) {
+  #ifndef MAGNUM_RENDERER
   auto& env = getBpsEnvironment(b);
+  #endif
   auto& episodeInstance =
       safeVectorGet(episodeInstanceSet_.episodeInstanceByEnv_, b);
 
@@ -1458,13 +1559,18 @@ void BatchedSimulator::clearEpisodeInstance(int b) {
   }
 
   if (b < config_.numDebugEnvs) {
+    #ifndef MAGNUM_RENDERER
     for (auto& instanceId : episodeInstance.persistentDebugInstanceIds_) {
       auto& env = getDebugBpsEnvironment(b);
       env.deleteInstance(instanceId);
     }
+    #else
+    CORRADE_INTERNAL_ASSERT_UNREACHABLE(); // TODO
+    #endif
     episodeInstance.persistentDebugInstanceIds_.clear();
   }
 
+  #ifndef MAGNUM_RENDERER
   // Remove free object bps instances **in reverse order**. This is so bps3D
   // will later allocate us new instance IDs (from its free list) in ascending
   // order (see assert in spawnFreeObject).
@@ -1475,13 +1581,20 @@ void BatchedSimulator::clearEpisodeInstance(int b) {
     int instanceId = getFreeObjectBpsInstanceId(b, freeObjectIndex);
     env.deleteInstance(instanceId);
   }
+  #else
+  renderer_->clear(b); // lol
+  #endif
 
   episodeInstance.firstFreeObjectInstanceId_ = -1;
 
+  #ifndef MAGNUM_RENDERER
   // remove staticScene bps instances
   for (const auto id : episodeInstance.staticSceneInstanceIds_) {
     env.deleteInstance(id);
   }
+  #else
+  renderer_->clear(b); // no-op, it's all cleared from above already
+  #endif
   episodeInstance.staticSceneInstanceIds_.clear();
 
   // remove all free objects from collision grid
@@ -1495,7 +1608,9 @@ void BatchedSimulator::resetEpisodeInstance(int b) {
                 << resets_[b]
                 << " is invalid for getNumEpisodes()=" << getNumEpisodes());
 
+  #ifndef MAGNUM_RENDERER // TODO useless variable
   auto& env = getBpsEnvironment(b);
+  #endif
 
   clearEpisodeInstance(b);
 
@@ -1516,10 +1631,14 @@ void BatchedSimulator::resetEpisodeInstance(int b) {
   for (const auto& instance : staticScene.renderAssetInstances_) {
     const auto& renderAsset =
         safeVectorGet(episodeSet_.renderAssets_, instance.renderAssetIndex_);
+    #ifndef MAGNUM_RENDERER
     const auto& blueprint = renderAsset.instanceBlueprint_;
-
     episodeInstance.staticSceneInstanceIds_.push_back(env.addInstance(
         blueprint.meshIdx_, blueprint.mtrlIdx_, instance.glMat_));
+    #else
+    // TODO i hope the name is what the blueprint corresponds to??
+    episodeInstance.staticSceneInstanceIds_.push_back(renderer_->add(b, renderAsset.name_));
+    #endif
   }
 
   auto& envState = safeVectorGet(pythonEnvStates_, b);
@@ -1535,7 +1654,13 @@ void BatchedSimulator::resetEpisodeInstance(int b) {
   {
     auto& robotInstance = robots_.robotInstances_[b];
 
-    const int numEnvs = bpsWrapper_->envs_.size();
+    const int numEnvs =
+      #ifndef MAGNUM_RENDERER
+      bpsWrapper_->envs_.size()
+      #else
+      renderer_->sceneCount()
+      #endif
+      ;
     const int numPosVars = robot_.numPosVars;
     float* yaws = &safeVectorGet(rollouts_.yaws_, currStorageStep_ * numEnvs);
     Mn::Vector2* positions =
@@ -1707,7 +1832,9 @@ bool BatchedSimulator::isEnvResetting(int b) const {
 void BatchedSimulator::spawnFreeObject(int b,
                                        int freeObjectIndex,
                                        bool reinsert) {
+  #ifndef MAGNUM_RENDERER
   auto& env = getBpsEnvironment(b);
+  #endif
   auto& episodeInstance =
       safeVectorGet(episodeInstanceSet_.episodeInstanceByEnv_, b);
   const auto& episode =
@@ -1721,7 +1848,9 @@ void BatchedSimulator::spawnFreeObject(int b,
   // indirection
   const auto& renderAsset =
       safeVectorGet(episodeSet_.renderAssets_, freeObject.renderAssetIndex_);
+  #ifndef MAGNUM_RENDERER
   const auto& blueprint = renderAsset.instanceBlueprint_;
+  #endif
   const auto& rotation = safeVectorGet(freeObject.startRotations_,
                                        freeObjectSpawn.startRotationIndex_);
 
@@ -1730,9 +1859,14 @@ void BatchedSimulator::spawnFreeObject(int b,
     // sloppy: this matrix gets created differently on episode reset
     Mn::Matrix4 mat =
         Mn::Matrix4::from(rotation.toMatrix(), freeObjectSpawn.startPos_);
+    #ifndef MAGNUM_RENDERER
     glm::mat4x3 glMat = toGlmMat4x3(mat);
     int instanceId =
         env.addInstance(blueprint.meshIdx_, blueprint.mtrlIdx_, glMat);
+    #else
+    // TODO is the name actually corresponding to the blueprint??
+    int instanceId = renderer_->add(b, renderAsset.name_, mat);
+    #endif
     // store the first free object's bps instanceId and assume the rest will be
     // contiguous
     if (freeObjectIndex == 0) {
@@ -1764,9 +1898,10 @@ void BatchedSimulator::removeFreeObjectFromCollisionGrid(int b,
 
   // perf todo: remove this
   auto& envState = safeVectorGet(pythonEnvStates_, b);
-  safeVectorGet(envState.obj_positions, freeObjectIndex) = INVALID_VEC3;
+  safeVectorGet(envState.obj_positions, freeObjectIndex) = Mn::Vector3{Mn::Constants::nan()};
 }
 
+// TODO eh what is this doing actually? i am no B P S
 int BatchedSimulator::getFreeObjectBpsInstanceId(int b,
                                                  int freeObjectIndex) const {
   auto& episodeInstance =
@@ -1779,16 +1914,22 @@ void BatchedSimulator::reinsertFreeObject(int b,
                                           int freeObjectIndex,
                                           const Magnum::Vector3& pos,
                                           const Magnum::Quaternion& rotation) {
+  #ifndef MAGNUM_RENDERER
   auto& env = getBpsEnvironment(b);
+  #endif
   auto& episodeInstance =
       safeVectorGet(episodeInstanceSet_.episodeInstanceByEnv_, b);
   episodeInstance.colGrid_.reinsertObstacle(freeObjectIndex, pos, rotation);
 
   // sloppy quat to Matrix3x3
   Mn::Matrix4 mat = Mn::Matrix4::from(rotation.toMatrix(), pos);
-  glm::mat4x3 glMat = toGlmMat4x3(mat);
   int instanceId = getFreeObjectBpsInstanceId(b, freeObjectIndex);
+  #ifndef MAGNUM_RENDERER
+  glm::mat4x3 glMat = toGlmMat4x3(mat);
   env.updateInstanceTransform(instanceId, glMat);
+  #else
+  renderer_->transformations(b)[instanceId] = mat;
+  #endif
 
   auto& envState = safeVectorGet(pythonEnvStates_, b);
   safeVectorGet(envState.obj_positions, freeObjectIndex) = pos;
@@ -1804,14 +1945,22 @@ void BatchedSimulator::initEpisodeSet() {
               "specify episodeSetFilepath");
 
     episodeSet_ = generateBenchmarkEpisodeSet(
-        config_.episodeGeneratorConfig, sceneMapping_, serializeCollection_);
+        config_.episodeGeneratorConfig,
+        #ifndef MAGNUM_RENDERER
+        sceneMapping_,
+        #endif
+        serializeCollection_);
     episodeSet_.saveToFile("../data/generated.episode_set.json");
   } else {
     ESP_CHECK(!config_.episodeSetFilepath.empty(),
               "For BatchedSimulatorConfig::doProceduralEpisodeSet==false, you "
               "must specify episodeSetFilepath");
     episodeSet_ = EpisodeSet::loadFromFile(config_.episodeSetFilepath);
-    postLoadFixup(episodeSet_, sceneMapping_, serializeCollection_);
+    postLoadFixup(episodeSet_,
+                  #ifndef MAGNUM_RENDERER
+                  sceneMapping_,
+                  #endif
+                  serializeCollection_);
   }
 }
 
@@ -1878,7 +2027,13 @@ void BatchedSimulator::reset(std::vector<int>&& resets) {
 
 // called within step to reset whatever envs are requested to reset
 void BatchedSimulator::resetHelper() {
-  const int numEnvs = bpsWrapper_->envs_.size();
+  const int numEnvs =
+    #ifndef MAGNUM_RENDERER
+    bpsWrapper_->envs_.size()
+    #else
+    renderer_->sceneCount()
+    #endif
+    ;
 
   for (int b = 0; b < numEnvs; b++) {
     if (!isEnvResetting(b)) {
@@ -1914,7 +2069,13 @@ void BatchedSimulator::startStepPhysicsOrReset(std::vector<float>&& actions,
 
 void BatchedSimulator::stepPhysics() {
   ProfilingScope scope("step physics");
-  const int numEnvs = bpsWrapper_->envs_.size();
+  const int numEnvs =
+    #ifndef MAGNUM_RENDERER
+    bpsWrapper_->envs_.size()
+    #else
+    renderer_->sceneCount()
+    #endif
+    ;
 
   BATCHED_SIM_ASSERT(config_.numSubsteps > 0);
   for (substep_ = 0; substep_ < config_.numSubsteps; substep_++) {
@@ -1946,7 +2107,13 @@ void BatchedSimulator::substepPhysics() {
   prevStorageStep_ = currStorageStep_;
   currStorageStep_ = (currStorageStep_ + 1) % maxStorageSteps_;
 
-  int numEnvs = bpsWrapper_->envs_.size();
+  const int numEnvs =
+    #ifndef MAGNUM_RENDERER
+    bpsWrapper_->envs_.size()
+    #else
+    renderer_->sceneCount()
+    #endif
+    ;
   int numPosVars = robot_.numPosVars;
 
   auto& robots = robots_;
@@ -2011,8 +2178,8 @@ void BatchedSimulator::substepPhysics() {
     float remappedBaseMovementAction = remapAction(
         baseMoveAction, baseMoveSetup.stepMin, baseMoveSetup.stepMax);
     positions[b] =
-        prevPositions[b] + Mn::Vector2(Mn::Math::cos(Mn::Math::Rad(yaws[b])),
-                                       -Mn::Math::sin(Mn::Math::Rad(yaws[b]))) *
+        prevPositions[b] + Mn::Vector2(Mn::Math::cos(Mn::Rad(yaws[b])),
+                                       -Mn::Math::sin(Mn::Rad(yaws[b]))) *
                                remappedBaseMovementAction;
 
     // sloppy: copy over all jointPositions, then process actionJointDegreePairs
@@ -2159,9 +2326,14 @@ void BatchedSimulator::setFreeCamera(const Mn::Vector3& pos, const Mn::Quaternio
 }
 #endif
 
+// TODO i am not B.P.S.
 void BatchedSimulator::setBpsCameraHelper(bool isDebug,
                                           int b,
+                                          #ifndef MAGNUM_RENDERER
                                           const glm::mat4& glCameraInvTransform,
+                                          #else
+                                          const Mn::Matrix4& glCameraInvTransform,
+                                          #endif
                                           float hfov) {
   const CameraSensorConfig& sensor =
       isDebug ? config_.debugSensor : config_.sensor0;
@@ -2169,16 +2341,24 @@ void BatchedSimulator::setBpsCameraHelper(bool isDebug,
   BATCHED_SIM_ASSERT(hfov > 0.f && hfov < 180.f);
   constexpr float near = 0.01;
   constexpr float far = 1000.f;
+  #ifndef MAGNUM_RENDERER
   auto& env = isDebug ? getDebugBpsEnvironment(b) : getBpsEnvironment(b);
   env.setCamera(glCameraInvTransform, hfov, aspectRatio, near, far);
+  #else
+  renderer_->camera(b) = Mn::Matrix4::perspectiveProjection(Mn::Rad{hfov}, aspectRatio, near, far)*glCameraInvTransform;
 }
 
+// TODO i am not B.P.S.
 void BatchedSimulator::updateBpsCameras(bool isDebug) {
   const Camera& cam = isDebug ? debugCam_ : mainCam_;
   const int numEnvs = isDebug ? config_.numDebugEnvs : config_.numEnvs;
 
   if (cam.attachNodeIndex == -1) {
+    #ifndef MAGNUM_RENDERER
     glm::mat4 world_to_camera(glm::inverse(toGlmMat4(cam.transform)));
+    #else
+    Mn::Matrix4 world_to_camera = cam.transform.inverted();
+    #endif
 
     for (int b = 0; b < numEnvs; b++) {
       setBpsCameraHelper(isDebug, b, world_to_camera, cam.hfov);
@@ -2197,12 +2377,16 @@ void BatchedSimulator::updateBpsCameras(bool isDebug) {
           safeVectorGet(robots_.nodeNewTransforms_, instanceIndex);
 
       auto cameraTransform = cameraAttachNodeTransform * cameraAttachTransform;
+      #ifndef MAGNUM_RENDERER
       auto glCameraNewInvTransform = glm::inverse(toGlmMat4(cameraTransform));
-
       setBpsCameraHelper(isDebug, b, glCameraNewInvTransform, cam.hfov);
+      #else
+      setBpsCameraHelper(isDebug, b, cameraTransform.inverted(), cam.hfov);
+      #endif
     }
   }
 }
+#endif
 
 void BatchedSimulator::startRender() {
   BATCHED_SIM_ASSERT(!isPhysicsThreadActive());
@@ -2210,11 +2394,19 @@ void BatchedSimulator::startRender() {
   BATCHED_SIM_ASSERT(isOkToRender_);
 
   updateBpsCameras(/*isDebug*/ false);
+  #ifdef MAGNUM_RENDERER
+  renderer_->draw();
+  #else
   bpsWrapper_->renderer_->render(bpsWrapper_->envs_.data());
+  #endif
 
   if (config_.numDebugEnvs > 0 && enableDebugSensor_) {
     updateBpsCameras(/*isDebug*/ true);
+    #ifdef MAGNUM_RENDERER
+    CORRADE_INTERNAL_ASSERT_UNREACHABLE(); // TODO
+    #else
     debugBpsWrapper_->renderer_->render(debugBpsWrapper_->envs_.data());
+    #endif
   }
 
   isOkToRender_ = false;
@@ -2224,24 +2416,39 @@ void BatchedSimulator::startRender() {
 void BatchedSimulator::waitRender() {
   ProfilingScope scope("wait for GPU render");
   BATCHED_SIM_ASSERT(isRenderStarted_);
+  #ifdef MAGNUM_RENDERER
+  /* Nothing, all blocking will happen when retrieving the CUDA device
+     pointer */
+  #else
   bpsWrapper_->renderer_->waitForFrame();
   if (config_.numDebugEnvs > 0 && enableDebugSensor_) {
     debugBpsWrapper_->renderer_->waitForFrame();
   }
+  #endif
   isRenderStarted_ = false;
   isOkToRender_ = true;
 }
 
+#ifdef MAGNUM_RENDERER
+MagnumRendererStandalone& BatchedSimulator::getMagnumRenderer() {
+  return *renderer_;
+}
+#else
 bps3D::Renderer& BatchedSimulator::getBpsRenderer() {
   BATCHED_SIM_ASSERT(bpsWrapper_->renderer_.get());
   return *bpsWrapper_->renderer_.get();
 }
+#endif
 
+#ifdef MAGNUM_RENDERER
+// TODO
+#else
 bps3D::Renderer& BatchedSimulator::getDebugBpsRenderer() {
   BATCHED_SIM_ASSERT(config_.numDebugEnvs > 0);
   BATCHED_SIM_ASSERT(debugBpsWrapper_->renderer_.get());
   return *debugBpsWrapper_->renderer_.get();
 }
+#endif
 
 RolloutRecord::RolloutRecord(int numRolloutSubsteps,
                              int numEnvs,
@@ -2260,6 +2467,7 @@ RolloutRecord::RolloutRecord(int numRolloutSubsteps,
 
 void BatchedSimulator::deleteDebugInstances() {
   if (config_.numDebugEnvs > 0) {
+    #ifndef MAGNUM_RENDERER
     const int numEnvs = config_.numDebugEnvs;
     for (int b = 0; b < numEnvs; b++) {
       auto& env = getDebugBpsEnvironment(b);
@@ -2269,6 +2477,9 @@ void BatchedSimulator::deleteDebugInstances() {
 
       safeVectorGet(debugInstancesByEnv_, b).clear();
     }
+    #else
+    CORRADE_INTERNAL_ASSERT_UNREACHABLE(); // TODO
+    #endif
   }
 }
 
@@ -2278,6 +2489,7 @@ int BatchedSimulator::addDebugInstance(const std::string& name,
                                        bool persistent) {
   BATCHED_SIM_ASSERT(config_.numDebugEnvs > 0);
 
+  #ifndef MAGNUM_RENDERER
   glm::mat4x3 glMat = toGlmMat4x3(transform);
   const auto& blueprint = sceneMapping_.findInstanceBlueprint(name);
   BATCHED_SIM_ASSERT(envIndex < config_.numEnvs);
@@ -2288,6 +2500,9 @@ int BatchedSimulator::addDebugInstance(const std::string& name,
     safeVectorGet(debugInstancesByEnv_, envIndex).push_back(instanceId);
   }
   return instanceId;
+  #else
+  CORRADE_INTERNAL_ASSERT_UNREACHABLE(); // TODO
+  #endif
 }
 
 std::string BatchedSimulator::getRecentStatsAndReset() const {
@@ -2403,7 +2618,9 @@ void BatchedSimulator::debugRenderColumnGrids(int b,
                                               int maxProgress) {
   BATCHED_SIM_ASSERT(b < config_.numDebugEnvs);
 
+  #ifndef MAGNUM_RENDERER
   auto& env = getDebugBpsEnvironment(b);
+  #endif
   auto& episodeInstance =
       safeVectorGet(episodeInstanceSet_.episodeInstanceByEnv_, b);
   auto& episode =
@@ -2412,8 +2629,10 @@ void BatchedSimulator::debugRenderColumnGrids(int b,
       safeVectorGet(episodeSet_.staticScenes_, episode.staticSceneIndex_);
   const auto& source = staticScene.columnGridSet_.getColumnGrid(0);
 
+  #ifndef MAGNUM_RENDERER
   const auto& blueprint =
       sceneMapping_.findInstanceBlueprint("cube_gray_shaded");
+  #endif
 
   // note off by one
   const float maxOccludedY = 3.f;
@@ -2449,17 +2668,27 @@ void BatchedSimulator::debugRenderColumnGrids(int b,
         Mn::Matrix4 localToBox = Mn::Matrix4::translation(aabb.center()) *
                                  Mn::Matrix4::scaling(aabb.size() * 0.5);
 
+        #ifndef MAGNUM_RENDERER
         glm::mat4x3 glMat = toGlmMat4x3(localToBox);
         int instanceId =
             env.addInstance(blueprint.meshIdx_, blueprint.mtrlIdx_, glMat);
         episodeInstance.persistentDebugInstanceIds_.push_back(instanceId);
+        #else
+        CORRADE_INTERNAL_ASSERT_UNREACHABLE(); // TODO
+        #endif
       }
     }
   }
 }
 
 void BatchedSimulator::reloadSerializeCollection() {
-  int numEnvs = bpsWrapper_->envs_.size();
+  const int numEnvs =
+    #ifndef MAGNUM_RENDERER
+    bpsWrapper_->envs_.size()
+    #else
+    renderer_->sceneCount()
+    #endif
+    ;
 
   serializeCollection_ =
       serialize::Collection::loadFromFile(config_.collectionFilepath);

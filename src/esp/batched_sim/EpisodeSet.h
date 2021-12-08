@@ -6,12 +6,16 @@
 #define ESP_BATCHEDSIM_EPISODESET_H_
 
 #include "esp/batched_sim/BatchedSimAssert.h"
-#include "esp/batched_sim/BpsSceneMapping.h"
 #include "esp/batched_sim/CollisionBroadphaseGrid.h"
 #include "esp/batched_sim/ColumnGrid.h"
 #include "esp/batched_sim/SerializeCollection.h"
+#include "esp/batched_sim/configure.h"
+#ifndef MAGNUM_RENDERER
+#include "esp/batched_sim/BpsSceneMapping.h"
+#endif
 
 #include <Magnum/Magnum.h>
+#include <Magnum/Math/Matrix4.h>
 #include <Magnum/Math/Range.h>
 #include <Magnum/Math/Vector3.h>
 
@@ -32,7 +36,9 @@ struct CollisionSphere {
 class RenderAsset {
  public:
   std::string name_;
+  #ifndef MAGNUM_RENDERER
   BpsSceneMapping::InstanceBlueprint instanceBlueprint_;
+  #endif
   bool needsPostLoadFixup_ = true;
 };
 
@@ -57,7 +63,11 @@ class RenderAssetInstance {
  public:
   int renderAssetIndex_;
   Transform transform_;  // for serialization
+  #ifdef MAGNUM_RENDERER
+  Magnum::Matrix4 glMat_;
+  #else
   glm::mat4x3 glMat_;    // computed from transform_
+  #endif
 };
 
 class StaticScene {
@@ -138,7 +148,9 @@ void updateFromSerializeCollection(FreeObject& freeObject,
                                    const serialize::Collection& collection);
 
 void postLoadFixup(EpisodeSet& set,
+                   #ifndef MAGNUM_RENDERER
                    const BpsSceneMapping& sceneMapping,
+                   #endif
                    const serialize::Collection& collection);
 
 }  // namespace batched_sim

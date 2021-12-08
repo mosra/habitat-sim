@@ -4,19 +4,28 @@
 
 #include "esp/batched_sim/BatchedSimAssert.h"
 #include "esp/batched_sim/BatchedSimulator.h"
+
+#include <cuda_runtime.h>
+
+#include <gtest/gtest.h>
+
+#ifdef MAGNUM_RENDERER
+#include <Corrade/Utility/Format.h>
+#include <Magnum/Trade/AbstractImageConverter.h>
+#include <Magnum/ImageView.h>
+#else
 #include "esp/batched_sim/BpsSceneMapping.h"
 #include "esp/batched_sim/ColumnGrid.h"
 #include "esp/batched_sim/GlmUtils.h"
 #include "esp/core/logging.h"
 
-#include <cuda_runtime.h>
-#include <gtest/gtest.h>
-#include <bps3D.hpp>
 #include <glm/gtx/transform.hpp>
+#include <bps3D.hpp>
 
 // FIXME
-// #define STB_IMAGE_WRITE_IMPLEMENTATION
+//#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
+#endif
 
 // for key_press
 #include <sys/ioctl.h>
@@ -29,7 +38,19 @@ namespace Mn = Magnum;
 namespace esp {
 namespace batched_sim {
 
+namespace Cr = Corrade;
+namespace Mn = Magnum;
+
 namespace {
+
+#ifdef MAGNUM_RENDERER
+Mn::Image2D copyCudaBufferToImage(const void* devicePointer, Mn::PixelFormat pixelFormat, const Mn::Vector2i& size) {
+  Mn::Image2D out{Mn::PixelStorage{}.setAlignment(1), pixelFormat, size, Cr::Containers::Array<char>{Cr::NoInit, std::size_t(size.product())*Mn::pixelSize(pixelFormat)}};
+
+  cudaMemcpy(out.data(), devicePointer, out.data().size(), cudaMemcpyDeviceToHost);
+  return out;
+}
+#else
 template <typename T>
 static std::vector<T> copyToHost(const T* dev_ptr,
                                  uint32_t width,
@@ -80,6 +101,7 @@ void saveFrame(const char* fname,
     stbi_write_bmp(fname2, width, height, num_channels, buffer.data());
   }
 }
+#endif
 
 // Hacky way to get keypresses at the terminal. Linux only.
 // https://stackoverflow.com/a/67038432
@@ -236,10 +258,12 @@ int key_press() {  // not working: ¹ (251), num lock (-144), caps lock (-20),
   }
 }
 
+#ifndef MAGNUM_RENDERER
 float calcLerpFraction(float x, float src0, float src1) {
   BATCHED_SIM_ASSERT(src0 < src1);
   return (x - src0) / (src1 - src0);
 }
+#endif
 
 }  // namespace
 
@@ -410,6 +434,7 @@ TEST_F(BatchedSimulatorTest, basic) {
         continue;
       }
 
+      #ifndef MAGNUM_RENDERER
       uint8_t* base_color_ptr =
           isDebug ? bsim.getDebugBpsRenderer().getColorPointer()
                   : bsim.getBpsRenderer().getColorPointer();
@@ -438,6 +463,31 @@ TEST_F(BatchedSimulatorTest, basic) {
         //           base_depth_ptr + b * out_dim.x * out_dim.y, out_dim.x,
         //           out_dim.y, 1);
       }
+      #else
+      CORRADE_INTERNAL_ASSERT(!isDebug); // TODO
+
+      Mn::Image2D color = copyCudaBufferToImage(bsim.getMagnumRenderer().cudaColorBufferDevicePointer(), bsim.getMagnumRenderer().framebufferColorFormat(), bsim.getMagnumRenderer().tileSize()*bsim.getMagnumRenderer().tileCount());
+      Mn::Image2D depth = copyCudaBufferToImage(bsim.getMagnumRenderer().cudaDepthBufferDevicePointer(), bsim.getMagnumRenderer().framebufferDepthFormat(), bsim.getMagnumRenderer().tileSize()*bsim.getMagnumRenderer().tileCount());
+
+      Cr::PluginManager::Manager<Mn::Trade::AbstractImageConverter> converterManager;
+      Cr::Containers::Pointer<Mn::Trade::AbstractImageConverter> converter = converterManager.loadAndInstantiate("AnyImageConverter");
+
+      Cr::Containers::Optional<Cr::Containers::Array<char>> out = converter->convertToData(color);
+      CORRADE_INTERNAL_ASSERT(out);
+      if(doSaveAllFramesForVideo)
+        Cr::Utility::Path::write(Cr::Utility::format(isDebug ? "debug_frame{:.4}" : "frame{:.4}.png", frameIdx), *out);
+      Cr::Utility::Path::write(isDebug ? "latest_debug.png" : "latest.png", *out);
+
+      /* Radiance HDR is used with bundled Magnum instead of EXR. It's awfully
+         low-precision but at least it doesn't require you to have the full
+         OpenEXR set up */
+      #ifndef MAGNUM_BUILD_STATIC
+      CORRADE_INTERNAL_ASSERT(converter->convertToFile(depth, "out_depth.exr"));
+      #else
+      Mn::ImageView2D redButActuallyDepth{Mn::PixelFormat::R32F, depth.size(), depth.data()};
+      CORRADE_INTERNAL_ASSERT(converter->convertToFile(redButActuallyDepth, "out_depth.hdr"));
+      #endif
+      #endif
     }
 
     int key = 0;

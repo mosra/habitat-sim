@@ -12,6 +12,7 @@
 #include "esp/io/JsonAllTypes.h"
 #include "esp/io/json.h"
 
+#include <Corrade/Containers/Pair.h>
 #include <Corrade/Utility/Directory.h>
 
 #include <rapidjson/document.h>
@@ -45,7 +46,7 @@ Keyframe loadKeyframe(const std::string& filepath) {
 
 int findOrInsertRenderAsset(std::vector<RenderAsset>& renderAssets,
                             const std::string& filepathOrName) {
-  auto name = std::filesystem::path(filepathOrName).stem();
+  auto name = Cr::Utility::Path::splitExtension(Cr::Utility::Path::split(filepathOrName).second()).first();
   auto it = std::find_if(renderAssets.begin(), renderAssets.end(),
                          [&](const auto& item) { return item.name_ == name; });
   if (it != renderAssets.end()) {
@@ -391,7 +392,9 @@ void addEpisode(const EpisodeGeneratorConfig& config,
 
 EpisodeSet generateBenchmarkEpisodeSet(
     const EpisodeGeneratorConfig& config,
+    #ifndef MAGNUM_RENDERER
     const BpsSceneMapping& sceneMapping,
+    #endif
     const serialize::Collection& collection) {
   int numEpisodes = config.numEpisodes;
 
@@ -465,7 +468,11 @@ EpisodeSet generateBenchmarkEpisodeSet(
   // sloppy: call postLoadFixup before adding episodes; this means that
   // set.maxFreeObjects_ gets computed incorrectly in here (but it will get
   // computed correctly, incrementally, in addEpisode).
-  postLoadFixup(set, sceneMapping, collection);
+  postLoadFixup(set,
+                #ifndef MAGNUM_RENDERER
+                sceneMapping,
+                #endif
+                collection);
 
   const auto robotProxy = createFreeObjectProxyForRobot(collection);
 

@@ -6,8 +6,11 @@
 #include "esp/batched_sim/BatchedSimAssert.h"
 #include "esp/batched_sim/GlmUtils.h"
 
+#include <Corrade/Containers/Optional.h>
+
 #include "esp/core/Check.h"
 
+namespace Cr = Corrade;
 namespace Mn = Magnum;
 
 namespace esp {

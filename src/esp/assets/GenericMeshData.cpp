@@ -67,7 +67,7 @@ void GenericMeshData::setMeshData(Magnum::Trade::MeshData&& meshData) {
      and store them here. */
   if(meshData_->isIndexed()) { // TODO how did this even work for non-indexed meshes????
     if (meshData_->indexType() == Mn::MeshIndexType::UnsignedInt)
-      collisionMeshData_.indices = meshData_->mutableIndices<Mn::UnsignedInt>();
+      collisionMeshData_.indices = meshData_->mutableIndices<Mn::UnsignedInt>().asContiguous();
     else
       collisionMeshData_.indices = indexData_ = meshData_->indicesAsArray();
   } else {

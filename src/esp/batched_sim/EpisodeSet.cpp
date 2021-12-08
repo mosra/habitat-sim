@@ -201,11 +201,15 @@ void updateFromSerializeCollection(EpisodeSet& set,
 }
 
 void postLoadFixup(EpisodeSet& set,
+                   #ifndef MAGNUM_RENDERER
                    const BpsSceneMapping& sceneMapping,
+                   #endif
                    const serialize::Collection& collection) {
   for (auto& renderAsset : set.renderAssets_) {
+    #ifndef MAGNUM_RENDERER
     renderAsset.instanceBlueprint_ =
         sceneMapping.findInstanceBlueprint(renderAsset.name_);
+    #endif
     renderAsset.needsPostLoadFixup_ = false;
   }
 
@@ -238,7 +242,11 @@ void postLoadFixup(EpisodeSet& set,
       Mn::Matrix4 mat =
           Mn::Matrix4::from(transform.rotation_.toMatrix(), transform.origin_);
       mat = mat * Mn::Matrix4::scaling(instance.transform_.scale_);
+      #ifdef MAGNUM_RENDERER
+      instance.glMat_ = mat;
+      #else
       instance.glMat_ = toGlmMat4x3(mat);
+      #endif
     }
 
     // sloppy: copy-pasted from addStageFixedObject

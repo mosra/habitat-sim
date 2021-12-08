@@ -19,7 +19,13 @@ namespace batched_sim {
 namespace {
 
 py::capsule getColorMemory(BatchedSimulator& bsim, const uint32_t groupIdx) {
+  #ifdef MAGNUM_RENDERER
+  CORRADE_ASSERT(groupIdx == 0,
+    "esp::batched_sim::getColorMemory(): what is groupIdx" << groupIdx << "for?", py::capsule());
+  return py::capsule(bsim.getMagnumRenderer().cudaColorBufferDevicePointer());
+  #else
   return py::capsule(bsim.getBpsRenderer().getColorPointer(groupIdx));
+  #endif
 }
 
 py::capsule getDebugColorMemory(BatchedSimulator& bsim, const uint32_t groupIdx) {

@@ -5,16 +5,22 @@
 #ifndef ESP_BATCHEDSIM_BATCHED_SIMULATOR_H_
 #define ESP_BATCHEDSIM_BATCHED_SIMULATOR_H_
 
-#include "esp/batched_sim/BpsSceneMapping.h"
 #include "esp/batched_sim/ColumnGrid.h"
 #include "esp/batched_sim/EpisodeGenerator.h"
 #include "esp/batched_sim/EpisodeSet.h"
 #include "esp/batched_sim/SerializeCollection.h"
 #include "esp/core/random.h"
+
+#include "esp/batched_sim/configure.h"
 #include "esp/physics/bullet/BulletArticulatedObject.h"
 #include "esp/sim/Simulator.h"
 
+#ifdef MAGNUM_RENDERER
+#include "MagnumRendererStandalone.h"
+#else
+#include "esp/batched_sim/BpsSceneMapping.h"
 #include <bps3D.hpp>
+#endif
 
 #include <condition_variable>
 #include <thread>
@@ -92,6 +98,7 @@ struct PythonEnvironmentState {
   ESP_SMART_POINTERS(PythonEnvironmentState);
 };
 
+#ifndef MAGNUM_RENDERER
 struct BpsWrapper {
   BpsWrapper(int gpuId,
              int numEnvs,
@@ -106,11 +113,15 @@ struct BpsWrapper {
   std::unique_ptr<bps3D::Renderer> renderer_;
   std::unique_ptr<bps3D::AssetLoader> loader_;
 };
+#endif
 
 struct Robot {
   Robot(const serialize::Collection& serializeCollection,
-        esp::sim::Simulator* sim,
-        BpsSceneMapping* sceneMapping);
+        esp::sim::Simulator* sim
+        #ifndef MAGNUM_RENDERER
+        , BpsSceneMapping* sceneMapping
+        #endif
+        );
   Robot() = default;
 
   void updateFromSerializeCollection(
@@ -122,7 +133,9 @@ struct Robot {
 
   // todo: delete artObj
   esp::physics::BulletArticulatedObject* artObj = nullptr;
+  #ifndef MAGNUM_RENDERER
   BpsSceneMapping* sceneMapping_ = nullptr;
+  #endif
   std::vector<Magnum::Matrix4> nodeTransformFixups;
   std::pair<std::vector<float>, std::vector<float>> jointPositionLimits;
 
@@ -176,7 +189,11 @@ class RobotInstanceSet {
   RobotInstanceSet() = default;
   RobotInstanceSet(Robot* robot,
                    const BatchedSimulatorConfig* config,
+                   #ifdef MAGNUM_RENDERER
+                   MagnumRendererStandalone& renderer_,
+                   #else
                    std::vector<bps3D::Environment>* envs,
+                   #endif
                    RolloutRecord* rollouts);
 
   void applyActionPenalties(const std::vector<float>& actions);
@@ -204,7 +221,11 @@ class RobotInstanceSet {
   btAlignedObjectArray<btQuaternion> scratch_q_;
   btAlignedObjectArray<btVector3> scratch_m_;
 
+  #ifdef MAGNUM_RENDERER
+  MagnumRendererStandalone* renderer_ = nullptr;
+  #else
   std::vector<bps3D::Environment>* envs_;
+  #endif
 
   std::vector<RobotInstance> robotInstances_;
 };
@@ -242,11 +263,16 @@ class BatchedSimulator {
                                std::vector<int>&& resets);
   void waitStepPhysicsOrReset();
 
+  #ifdef MAGNUM_RENDERER
+  MagnumRendererStandalone& getMagnumRenderer();
+  // TODO debug renderer?!
+  #else
   bps3D::Renderer& getBpsRenderer();
   bps3D::Renderer& getDebugBpsRenderer();
 
   bps3D::Environment& getBpsEnvironment(int envIndex);
   bps3D::Environment& getDebugBpsEnvironment(int envIndex);
+  #endif
 
   void deleteDebugInstances();  // probably call at start of frame render
   // probably add these every frame ("immediate mode", not persistent)
@@ -303,10 +329,15 @@ class BatchedSimulator {
   void updateGripping();
   void resetHelper();
   void updatePythonEnvironmentState();
+  // TODO i am not B.P.S.
   void updateBpsCameras(bool isDebug);
   void setBpsCameraHelper(bool isDebug,
                           int b,
+                          #ifndef MAGNUM_RENDERER
                           const glm::mat4& glCameraInvTransform,
+                          #else
+                          const Mn::Matrix4& glCameraInvTransform,
+                          #endif
                           float hfov);
 
   // uses episode spawn location
@@ -348,8 +379,12 @@ class BatchedSimulator {
   int substep_ = -1;
   RolloutRecord rollouts_;
   std::unique_ptr<esp::sim::Simulator> legacySim_;
+  #ifdef MAGNUM_RENDERER
+  Corrade::Containers::Optional<MagnumRendererStandalone> renderer_;
+  #else
   std::unique_ptr<BpsWrapper> bpsWrapper_;
   std::unique_ptr<BpsWrapper> debugBpsWrapper_;
+  #endif
   int actionDim_ = -1;
   std::vector<float> actions_;
   std::vector<int> resets_;  // episode index, or -1 if not resetting
@@ -361,7 +396,9 @@ class BatchedSimulator {
   EpisodeSet episodeSet_;
   EpisodeInstanceSet episodeInstanceSet_;
 
+  #ifndef MAGNUM_RENDERER
   BpsSceneMapping sceneMapping_;
+  #endif
   std::vector<std::vector<int>> debugInstancesByEnv_;
   mutable StatRecord recentStats_;
   esp::core::Random random_{0};

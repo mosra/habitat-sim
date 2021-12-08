@@ -207,6 +207,12 @@ if(NOT USE_SYSTEM_MAGNUM)
     set(WITH_OPENGLTESTER ON CACHE BOOL "" FORCE)
   endif()
 
+  # Extra plugins for batch renderer asset import / conversion
+  set(WITH_GLTFIMPORTER ON CACHE BOOL "" FORCE)
+  set(WITH_GLTFSCENECONVERTER ON CACHE BOOL "" FORCE)
+  set(WITH_KTXIMPORTER ON CACHE BOOL "" FORCE)
+  set(WITH_KTXIMAGECONVERTER ON CACHE BOOL "" FORCE)
+
   # Basis Universal. The repo is extremely huge and so instead of a Git
   # submodule we bundle just the transcoder files, and only a subset of the
   # formats (BC7 mode 6 has > 1 MB tables, ATC/FXT1/PVRTC2 are quite rare and

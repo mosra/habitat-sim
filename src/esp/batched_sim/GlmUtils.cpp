@@ -12,6 +12,7 @@ namespace Mn = Magnum;
 namespace esp {
 namespace batched_sim {
 
+#ifndef MAGNUM_RENDERER
 glm::mat4 toGlmMat4(const Mn::Vector3& pos, const Mn::Quaternion& rot) {
   Mn::Matrix3x3 r = rot.toMatrix();
   return glm::mat4(r[0][0], r[0][1], r[0][2], 0.f, r[1][0], r[1][1], r[1][2],
@@ -76,6 +77,7 @@ Magnum::Vector3 inverseTransformPoint(const glm::mat4x3& glMat, const Magnum::Ve
 
   return result;
 }
+#endif
 
 Magnum::Vector3 getRangeCorner(const Magnum::Range3D& range, int cornerIdx) {
 
@@ -130,6 +132,7 @@ bool sphereBoxContactTest(const Magnum::Vector3& sphereOrigin, float sphereRadiu
   return (distanceSq < sphereRadiusSq);
 }
 
+#ifndef MAGNUM_RENDERER
 template<int maxTests, bool numTestsIsMaxTests>
 bool batchSphereOrientedBoxContactTest(const glm::mat4x3** orientedBoxTransforms, 
   const Magnum::Vector3** positions,
@@ -173,6 +176,7 @@ bool batchSphereOrientedBoxContactTest(const glm::mat4x3** orientedBoxTransforms
 
   return resultBits;
 }
+#endif
 
 Mn::Quaternion yawToRotation(float yawRadians) {
   constexpr Mn::Vector3 upAxis(0.f, 1.f, 0.f);
@@ -201,12 +205,14 @@ Mn::Vector3 getSphericalCoordinates(
   return {rho, theta, phi};
 }
 
+#ifndef MAGNUM_RENDERER
 template bool batchSphereOrientedBoxContactTest<64, true>(const glm::mat4x3** orientedBoxTransforms, 
   const Magnum::Vector3** positions,
   float sphereRadiusSq, const Magnum::Range3D** boxRanges, int numTests);
 template bool batchSphereOrientedBoxContactTest<64, false>(const glm::mat4x3** orientedBoxTransforms, 
   const Magnum::Vector3** positions,
   float sphereRadiusSq, const Magnum::Range3D** boxRanges, int numTests);
+#endif
 
 }  // namespace batched_sim
 }  // namespace esp

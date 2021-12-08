@@ -90,6 +90,13 @@ corrade_add_test(SensorTest SensorTest.cpp LIBRARIES sensor sim)
 target_include_directories(SensorTest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 test(BatchedSimTest batched_sim)
+if(MAGNUM_RENDERER)
+  target_include_directories(
+    BatchedSimTest PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+                ${CMAKE_CURRENT_LIST_DIR}/../esp/cuda_helpers
+  )
+  target_link_libraries(BatchedSimTest ${CUDART_LIBRARY})
+endif()
 
 test(ColumnGridTest batched_sim)
 
