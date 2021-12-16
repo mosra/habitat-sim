@@ -1377,8 +1377,8 @@ bool ResourceManager::loadRenderAssetGeneral(const AssetInfo& info) {
              meshes_.at(meshMetaData.meshIndex.first)) {
     // no default scene --- standalone OBJ/PLY files, for example
     // take a wild guess and load the first mesh with the first material
-    // addMeshToDrawables(metaData, *parent, drawables, 0, 0);
-    loadMeshHierarchy(*fileImporter_, meshMetaData.root, 0);
+    meshMetaData.root.children.emplace_back();
+    meshMetaData.root.children.back().meshIDLocal = 0;
   } else {
     ESP_ERROR() << "No default scene available and no meshes found, exiting";
     return false;

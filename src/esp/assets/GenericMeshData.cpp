@@ -65,10 +65,16 @@ void GenericMeshData::setMeshData(Magnum::Trade::MeshData&& meshData) {
   /* For collision data we need indices as UnsignedInt. If the mesh already has
      those, just make the collision data reference them. If not, unpack them
      and store them here. */
-  if (meshData_->indexType() == Mn::MeshIndexType::UnsignedInt)
-    collisionMeshData_.indices = meshData_->mutableIndices<Mn::UnsignedInt>();
-  else
-    collisionMeshData_.indices = indexData_ = meshData_->indicesAsArray();
+  if(meshData_->isIndexed()) { // TODO how did this even work for non-indexed meshes????
+    if (meshData_->indexType() == Mn::MeshIndexType::UnsignedInt)
+      collisionMeshData_.indices = meshData_->mutableIndices<Mn::UnsignedInt>();
+    else
+      collisionMeshData_.indices = indexData_ = meshData_->indicesAsArray();
+  } else {
+    collisionMeshData_.indices = indexData_ = Cr::Containers::Array<Mn::UnsignedInt>{Mn::NoInit, meshData_->vertexCount()};
+    for(std::size_t i = 0; i != indexData_.size(); ++i)
+      indexData_[i] = i;
+  }
 }  // setMeshData
 
 void GenericMeshData::importAndSetMeshData(
