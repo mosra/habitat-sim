@@ -211,6 +211,7 @@ if(NOT USE_SYSTEM_MAGNUM)
   # submodule we bundle just the transcoder files, and only a subset of the
   # formats (BC7 mode 6 has > 1 MB tables, ATC/FXT1/PVRTC2 are quite rare and
   # not supported by Magnum).
+  set(CMAKE_DISABLE_FIND_PACKAGE_Zstd ON)
   set(BASIS_UNIVERSAL_DIR "${DEPS_DIR}/basis-universal")
   set(
     CMAKE_CXX_FLAGS
