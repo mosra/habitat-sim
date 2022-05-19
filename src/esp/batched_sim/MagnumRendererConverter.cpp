@@ -12,6 +12,7 @@
 #include <Corrade/Utility/MurmurHash2.h>
 #include <Corrade/Utility/Path.h>
 #include <Magnum/PixelFormat.h>
+#include <Magnum/Math/Color.h>
 #include <Magnum/Math/Matrix4.h>
 #include <Magnum/MeshTools/Concatenate.h>
 #include <Magnum/SceneTools/FlattenMeshHierarchy.h>
@@ -25,6 +26,7 @@
 #include <Magnum/Trade/TextureData.h>
 
 using namespace Magnum;
+using namespace Math::Literals;
 using namespace Containers::Literals;
 
 /* std::hash specialization to be able to use Corrade::String in unordered_map */
@@ -64,6 +66,10 @@ int main(int argc, char** argv) {
   if(PluginManager::PluginMetadata* m = imageConverterManager.metadata("BasisImageConverter")) {
     // TODO set up once GltfSceneConverter uses it directly
   }
+
+  /* Magnum's OBJ importer is ... well, not great. It'll get replaced eventually. */
+  if(importerManager.loadState("ObjImporter") != PluginManager::LoadState::NotFound)
+    importerManager.setPreferredPlugins("ObjImporter", {"AssimpImporter"});
 
   Containers::Pointer<Trade::AbstractImporter> importer = importerManager.loadAndInstantiate("AnySceneImporter");
   Containers::Pointer<Trade::AbstractSceneConverter> converter = converterManager.loadAndInstantiate(args.value("converter"));
@@ -108,57 +114,13 @@ int main(int argc, char** argv) {
     Int meshMaterial;
   };
   Containers::Array<Mesh> meshes;
-//   const auto import = [&](Containers::StringView filename) {
-//     importer->openFile(filename);
-//     CORRADE_INTERNAL_ASSERT(importer->meshCount() == 1);
-//     CORRADE_INTERNAL_ASSERT(importer->materialCount() == 1);
-//
-//     Containers::Optional<Trade::MeshData> mesh = importer->mesh(0);
-//     Containers::Optional<Trade::MaterialData> material = importer->material(0);
-//
-//     /* If the material is textured, extract the image as well */
-//     // TODO findAttributeId()!
-//     if(material->hasAttribute(Trade::MaterialAttribute::BaseColorTexture)) {
-//       UnsignedInt& textureId = material->mutableAttribute<UnsignedInt>(Trade::MaterialAttribute::BaseColorTexture);
-//
-//       Containers::Optional<Trade::TextureData> texture = importer->texture(textureId);
-//       CORRADE_INTERNAL_ASSERT(texture && texture->type() == Trade::TextureType::Texture2D);
-//
-//       /* Patch the material to use the zero texture but add a layer as well and
-//          make it just Flat */
-//       textureId = 0;
-//       CORRADE_INTERNAL_ASSERT(material->layerCount() == 1);
-//       Containers::Array<Trade::MaterialAttributeData> attributes = material->releaseAttributeData();
-//       arrayAppend(attributes, InPlaceInit, "baseColorTextureLayer", UnsignedInt(inputImages.size()));
-//       material = Trade::MaterialData{Trade::MaterialType::Flat, std::move(attributes)};
-//
-//       arrayAppend(inputImages, *importer->image2D(texture->image()));
-//
-//     /* Otherwise just make it Flat */
-//     } else {
-//       CORRADE_INTERNAL_ASSERT(material->layerCount() == 1);
-//       material = Trade::MaterialData{Trade::MaterialType::Flat, material->releaseAttributeData()};
-//     }
-//
-//     /* Object setup */
-//     Object o;
-//     o.id = objects.size();
-//     o.mesh = 0;
-//     // TODO concatenate() should do this on its own
-//     o.meshIndexOffset = indexOffset;
-//     o.meshIndexCount = mesh->indexCount();
-//     indexOffset += mesh->indexCount();
-//     converter->setObjectName(inputMeshes.size(), Utility::Path::split(filename).second());
-//     o.meshMaterial = *converter->add(*material);
-//
-//     /* Mesh setup */
-//     // TODO convert from a strip/... if not triangles
-//     arrayAppend(inputMeshes, *std::move(mesh));
-//
-//     arrayAppend(objects, o);
-//   };
 
-  const auto importMultiple = [&](Containers::StringView filename, std::unordered_map<Containers::String, Containers::Pair<UnsignedInt, UnsignedInt>>* uniqueMeshes = nullptr) {
+  const auto import = [&](
+    Containers::StringView filename,
+    Containers::StringView name = {},
+    Containers::Optional<Color4> forceColor = {},
+    std::unordered_map<Containers::String, Containers::Pair<UnsignedInt, UnsignedInt>>* uniqueMeshes = nullptr
+  ) {
     CORRADE_INTERNAL_ASSERT_OUTPUT(importer->openFile(filename));
     CORRADE_INTERNAL_ASSERT(importer->sceneCount() == 1); // TODO multi-scene??
 
@@ -170,7 +132,9 @@ int main(int argc, char** argv) {
     root.mapping = parents.size();
     root.parent = -1;
     arrayAppend(parents, root);
-    converter->setObjectName(root.mapping, Utility::Path::splitExtension(Utility::Path::split(filename).second()).first());
+    converter->setObjectName(root.mapping,
+      name ? name :
+      Utility::Path::splitExtension(Utility::Path::split(filename).second()).first());
 
     /* Meshes are unfortunately named in a useless way, so override them with
        names from the objects referencing them instead */
@@ -237,9 +201,10 @@ int main(int argc, char** argv) {
       }
 
       if(!duplicate) {
-        if(uniqueMeshes) Debug{} << "New mesh" << meshName << "in" << Utility::Path::split(filename).second();
-
-        uniqueMeshes->insert({std::move(meshName), {indexOffset, mesh->indexCount()}});
+        if(uniqueMeshes) {
+          Debug{} << "New mesh" << meshName << "in" << Utility::Path::split(filename).second();
+          uniqueMeshes->insert({std::move(meshName), {indexOffset, mesh->indexCount()}});
+        }
         m.meshIndexOffset = indexOffset;
         indexOffset += mesh->indexCount()*4; // TODO ints hardcoded
 
@@ -253,33 +218,58 @@ int main(int argc, char** argv) {
 
       /* Otherwise parse it. If textured, extract the image as well. */
       } else {
-        Debug{} << "New material for" << meshNames[transformationMeshMaterial.first()] << "in" << Utility::Path::split(filename).second();
-
         Containers::Optional<Trade::MaterialData> material = importer->material(transformationMeshMaterial.second());
         CORRADE_INTERNAL_ASSERT(material);
+
+        /* Override the color if the attribute is already there. Otherwise a
+           new attribute gets added to the attributes array below */
+        bool hasColorAttribute = false;
+        if(forceColor && material->hasAttribute(Trade::MaterialAttribute::BaseColor)) {
+            hasColorAttribute = true;
+            material->mutableAttribute<Color4>(Trade::MaterialAttribute::BaseColor) = *forceColor;
+        }
+
+        /* Not calling releaseAttributeData() yet either, as we need to ask
+           hasAttribute() first */
+        Containers::Array<Trade::MaterialAttributeData> attributes;
         // TODO findAttributeId()!
         if(material->hasAttribute(Trade::MaterialAttribute::BaseColorTexture)) {
+          Debug{} << "New textured material for" << meshNames[transformationMeshMaterial.first()] << "in" << Utility::Path::split(filename).second();
+
           UnsignedInt& textureId = material->mutableAttribute<UnsignedInt>(Trade::MaterialAttribute::BaseColorTexture);
 
           Containers::Optional<Trade::TextureData> texture = importer->texture(textureId);
           CORRADE_INTERNAL_ASSERT(texture && texture->type() == Trade::TextureType::Texture2D);
 
-          /* Patch the material to use the zero texture but add a layer as well
-            and make it just Flat */
+          /* Patch the material to use the zero texture but add a layer as
+             well, referencing the just added image (plus one for the first
+             white layer) and make it just Flat */
           textureId = 0;
           CORRADE_INTERNAL_ASSERT(material->layerCount() == 1);
-          Containers::Array<Trade::MaterialAttributeData> attributes = material->releaseAttributeData();
-          arrayAppend(attributes, InPlaceInit, "baseColorTextureLayer", UnsignedInt(inputImages.size()));
-          material = Trade::MaterialData{Trade::MaterialType::Flat, std::move(attributes)};
+          attributes = material->releaseAttributeData();
+          arrayAppend(attributes, InPlaceInit, "baseColorTextureLayer", UnsignedInt(inputImages.size() + 1));
+
+          // TODO add texture scaling if the image is smaller than 2K
 
           arrayAppend(inputImages, *importer->image2D(texture->image()));
 
-        /* Otherwise just make it Flat */
+        /* Otherwise make it reference the first (white) image layer and make
+           it just Flat */
         } else {
-          // TODO make it reference a white texture??
-          CORRADE_INTERNAL_ASSERT(material->layerCount() == 1);
-          material = Trade::MaterialData{Trade::MaterialType::Flat, material->releaseAttributeData()};
+          Debug{} << "New untextured material for" << meshNames[transformationMeshMaterial.first()] << "in" << Utility::Path::split(filename).second();
+
+          attributes = material->releaseAttributeData();
+          arrayAppend(attributes, {
+            Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTexture, 0u},
+            Trade::MaterialAttributeData{"baseColorTextureLayer", 0u}
+          });
         }
+
+        if(forceColor && !hasColorAttribute) {
+          arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColor, *forceColor);
+        }
+
+        material = Trade::MaterialData{Trade::MaterialType::Flat, std::move(attributes)};
 
         importedMaterialIds[transformationMeshMaterial.second()] = m.meshMaterial = *converter->add(*material);
       }
@@ -288,21 +278,66 @@ int main(int argc, char** argv) {
     }
   };
 
-  /* Import the stuff. Well, some of it. */
-  // TODO haha
-//   Containers::String debugModelsPath = Utility::Path::join(args.value("input"), "extra_source_data_v0/debug_models");
-//   import(Utility::Path::join(debugModelsPath, "sphere_green_wireframe.glb"));
-//   import(Utility::Path::join(debugModelsPath, "sphere_orange_wireframe.glb"));
-//   import(Utility::Path::join(debugModelsPath, "cube_gray_shaded.glb"));
-//   import(Utility::Path::join(debugModelsPath, "cube_gray_shaded.glb")); // TODO
+  /* Spot */
+  Containers::String spotPath = Utility::Path::join(args.value("input"), "extra_source_data_v0/spot_arm_textured/spot_arm/spot_arm/meshes");
+  for(auto&& i: std::initializer_list<Containers::Pair<const char*, Color4>>{
+    // TODO why not take the colored models instead of having to manually set
+    //  the color?
+    // TODO or, rather, just parse the URDF already
+    {"arm0.link_el0.obj", 0x3f3f3f_rgbf},
+    {"arm0.link_el1.obj", 0xffff00_rgbf},
+    {"arm0.link_fngr.obj", 0x7f7f7f_rgbf},
+    // TODO yeyeyeye ... bored
+  })
+    import(Utility::Path::join(spotPath, i.first()), {}, i.second());
 
+  /* Debug models */
+  // TODO generate these all from Primitives instead of doing crazy stuff with
+  //  glTF files
+  Containers::String debugModelsPath = Utility::Path::join(args.value("input"), "extra_source_data_v0/debug_models");
+  for(const char* filename: {
+    // TODO make the "wireframe" a reasonable wireframe mesh
+    "sphere_green_wireframe.glb",
+    "sphere_orange_wireframe.glb",
+    "sphere_blue_wireframe.glb",
+    "sphere_pink_wireframe.glb",
+    "cube_gray_shaded.glb",
+    "cube_green.glb",
+    "cube_blue.glb",
+    "cube_pink.glb",
+    "cube_green_wireframe.glb",
+    "cube_orange_wireframe.glb",
+    "cube_blue_wireframe.glb",
+    "cube_pink_wireframe.glb"
+  })
+    import(Utility::Path::join(debugModelsPath, filename));
+
+  /* ReplicaCAD */
   Containers::String replicaPath = Utility::Path::join(args.value("input"), "ReplicaCAD_baked_lighting_v1.5/stages_uncompressed");
   std::unordered_map<Containers::String, Containers::Pair<UnsignedInt, UnsignedInt>> uniqueReplicaMeshes;
   for(std::size_t i = 0; i <= 4; ++i) {
     for(std::size_t j = 0; j <= 20; ++j) {
-      importMultiple(Utility::Path::join(replicaPath, Utility::format("Baked_sc{}_staging_{:.2}.glb", i, j)), &uniqueReplicaMeshes);
+      import(
+        Utility::Path::join(replicaPath, Utility::format("Baked_sc{}_staging_{:.2}.glb", i, j)),
+        {}, {},
+        &uniqueReplicaMeshes);
     }
   }
+
+  /* YCB */
+  Containers::String ycbPath = Utility::Path::join(args.value("input"), "hab_ycb_v1.1/ycb/");
+  for(const char* name: {
+    "024_bowl",
+    "003_cracker_box",
+    "010_potted_meat_can",
+    "002_master_chef_can",
+    "004_sugar_box",
+    "005_tomato_soup_can",
+    "009_gelatin_box",
+    "008_pudding_box",
+    "007_tuna_fish_can"
+  })
+    import(Utility::Path::join({ycbPath, name, "google_16k/textured.obj"}), name);
 
   /* Target layout for the mesh. So far just for flat rendering, no normals
      etc */
@@ -316,11 +351,29 @@ int main(int argc, char** argv) {
   MeshTools::concatenateInto(mesh, inputMeshReferences);
   CORRADE_INTERNAL_ASSERT(converter->add(mesh));
 
-  /* A combined 3D image */
-  Trade::ImageData3D image{PixelFormat::RGB8Unorm, {2048, 2048, Int(inputImages.size())}, Containers::Array<char>{NoInit, 2048*2048*inputImages.size()*4}};
+  /* A combined 3D image. First layer is fully white for input meshes that have
+     no textures. */
+  Trade::ImageData3D image{PixelFormat::RGB8Unorm,
+    // TODO don't hardcode max image size (goes onto the same pile as shitty
+    //  "atlasing")
+    {2048, 2048, Int(inputImages.size() + 1)},
+    Containers::Array<char>{NoInit, 2048*2048*(inputImages.size() + 1)*4}};
+  /* Fill the first layer white */
+  constexpr char white[]{'\xff'};
+  Utility::copy(
+    Containers::StridedArrayView3D<const char>{white, {2048, 2048, 3}, {0, 0, 0}},
+    image.mutablePixels()[0]);
+  /* Copy the other images */
   for(std::size_t i = 0; i != inputImages.size(); ++i) {
     CORRADE_INTERNAL_ASSERT(inputImages[i].format() == PixelFormat::RGB8Unorm);
-    Utility::copy(inputImages[i].pixels(), image.mutablePixels()[i]);
+    Utility::copy(inputImages[i].pixels(),
+      // TODO did i mention the "atlas packing" is EXTREMELY SHITTY?
+      image.mutablePixels()[i + 1].prefix({
+        // TODO have implicit conversion of Vector to StridedDimensions, FINALLY
+        std::size_t(inputImages[i].size().x()),
+        std::size_t(inputImages[i].size().y()),
+        std::size_t(inputImages[i].pixelSize())
+      }));
   }
 
   /* Clear the original images array to relieve the memory pressure a bit --

@@ -119,6 +119,7 @@ if(MAGNUM_RENDERER)
   if(MAGNUM_BUILD_STATIC)
     target_link_libraries(MagnumRendererConverter PRIVATE
       Magnum::AnySceneImporter
+      MagnumPlugins::AssimpImporter
       MagnumPlugins::StbImageImporter
       MagnumPlugins::KtxImageConverter
       MagnumPlugins::GltfSceneConverter
