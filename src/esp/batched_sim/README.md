@@ -18,8 +18,8 @@ needs lots of memory, that has to be done separately using for example the
 `magnum-sceneconverter` utility (take it from the prebuilt tools):
 
 ```sh
-magnum-imageconverter -D3 --map -v -C BasisImageConverter \
-  -c uastc,rdo_uastc,rdo_uastc_dict_size=1024,ktx2_zstd_supercompression_level=20,mip_gen,threads=0,y_flip=false \
+magnum-imageconverter -D3 --map -C BasisImageConverter \
+  -c uastc,rdo_uastc,rdo_uastc_dict_size=1024,ktx2_zstd_supercompression_level=20,mip_gen,threads=0 \
   yay.0.ktx2 yay.0.basis.ktx2
 ```
 

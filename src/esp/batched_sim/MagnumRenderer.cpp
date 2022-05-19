@@ -439,8 +439,7 @@ std::size_t MagnumRenderer::add(const Mn::UnsignedInt sceneId, const Cr::Contain
     arrayAppend(scene.draws, Cr::InPlaceInit)
       .setMaterialId(meshView.materialId);
     arrayAppend(scene.textureTransformations, Cr::InPlaceInit)
-      // TODO flip again once the input is fixed
-      .setLayer(104 - _state->textureLayers[meshView.materialId]);
+      .setLayer(_state->textureLayers[meshView.materialId]);
     arrayAppend(scene.drawCommands, Cr::InPlaceInit,
       meshView.indexOffsetInBytes, meshView.indexCount);
   }
