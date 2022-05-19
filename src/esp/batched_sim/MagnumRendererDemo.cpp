@@ -78,6 +78,10 @@ MagnumRendererDemo::MagnumRendererDemo(const Arguments& arguments): Mn::Platform
     _renderer->add(i, Cr::Utility::format("Baked_sc{}_staging_{:.2}", i/21, i%21));
   }
 
+  _renderer->add(0, "sphere_green_wireframe");
+
+  _renderer->add(1, "007_tuna_fish_can", Mn::Matrix4::scaling(Mn::Vector3{50.0f}));
+
   Mn::Debug{} << "Rendering" << tileCount.product() << tileSize << "tiles every frame";
 
   if(args.isSet("profile")) {

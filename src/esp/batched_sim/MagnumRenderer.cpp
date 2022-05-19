@@ -121,6 +121,11 @@ struct Scene {
   Mn::GL::Buffer textureTransformationUniform;
 };
 
+struct TextureTransformation {
+  Mn::UnsignedInt layer;
+  Mn::Matrix3 transformation;
+};
+
 }
 
 struct MagnumRenderer::State {
@@ -137,7 +142,7 @@ struct MagnumRenderer::State {
   // TODO have the materials deduplicated, and then this should have a layer
   //  for each mesh view instead
   // TODO also the scale + offset, once we have non-shitty atlasing
-  Cr::Containers::Array<Mn::UnsignedInt> textureLayers;
+  Cr::Containers::Array<TextureTransformation> textureTransformations;
 
   /* Pairs of mesh views (index byte offset and count), material IDs and
      initial transformations for draws. Used by add() to populate the draw
@@ -274,7 +279,7 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
      them to draws instead */
   // TODO have a step that deduplicates materials and puts the layer to the
   //  scene instead
-  _state->textureLayers = Cr::Containers::Array<Mn::UnsignedInt>{Cr::DefaultInit, importer->materialCount()};
+  _state->textureTransformations = Cr::Containers::Array<TextureTransformation>{Cr::DefaultInit, importer->materialCount()};
   {
     Cr::Containers::Array<Mn::Shaders::PhongMaterialUniform> materialData{Cr::DefaultInit, importer->materialCount()};
     for(std::size_t i = 0; i != materialData.size(); ++i) {
@@ -288,8 +293,12 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
       CORRADE_ASSERT(flatMaterial.texture() == 0,
         "MagnumRenderer::addFile(): expected material" << i << "to reference the only texture, got" << flatMaterial.texture(), );
 
-      // TODO builtin attribute for this
-      _state->textureLayers[i] = flatMaterial.attribute<Mn::UnsignedInt>("baseColorTextureLayer"_s);
+      _state->textureTransformations[i] = {
+        // TODO builtin attribute for this
+        flatMaterial.attribute<Mn::UnsignedInt>("baseColorTextureLayer"_s),
+        // TODO fix gltf converter to flip texcoords (ffs!!)
+        flatMaterial.hasTextureTransformation() ? Mn::Matrix3::translation(Mn::Vector2::yAxis(1.0f))*Mn::Matrix3::scaling(Mn::Vector2::yScale(-1.0f))*flatMaterial.textureMatrix()*Mn::Matrix3::translation(Mn::Vector2::yAxis(1.0f))*Mn::Matrix3::scaling(Mn::Vector2::yScale(-1.0f)) : Mn::Matrix3{}
+      };
     }
 
     // TODO immutable buffer storage
@@ -449,7 +458,8 @@ std::size_t MagnumRenderer::add(const Mn::UnsignedInt sceneId, const Cr::Contain
     arrayAppend(scene.draws, Cr::InPlaceInit)
       .setMaterialId(meshView.materialId);
     arrayAppend(scene.textureTransformations, Cr::InPlaceInit)
-      .setLayer(_state->textureLayers[meshView.materialId]);
+      .setTextureMatrix(_state->textureTransformations[meshView.materialId].transformation)
+      .setLayer(_state->textureTransformations[meshView.materialId].layer);
     arrayAppend(scene.drawCommands, Cr::InPlaceInit,
       meshView.indexOffsetInBytes, meshView.indexCount);
   }

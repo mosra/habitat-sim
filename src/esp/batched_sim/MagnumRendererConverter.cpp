@@ -13,6 +13,7 @@
 #include <Corrade/Utility/Path.h>
 #include <Magnum/PixelFormat.h>
 #include <Magnum/Math/Color.h>
+#include <Magnum/Math/Matrix3.h>
 #include <Magnum/Math/Matrix4.h>
 #include <Magnum/MeshTools/Concatenate.h>
 #include <Magnum/SceneTools/FlattenMeshHierarchy.h>
@@ -45,6 +46,8 @@ namespace std {
 constexpr Trade::SceneField SceneFieldMeshViewIndexOffset = Trade::sceneFieldCustom(0);
 constexpr Trade::SceneField SceneFieldMeshViewIndexCount = Trade::sceneFieldCustom(1);
 constexpr Trade::SceneField SceneFieldMeshViewMaterial = Trade::sceneFieldCustom(2);
+
+constexpr Vector2i TextureAtlasSize{2048};
 
 int main(int argc, char** argv) {
   Utility::Arguments args;
@@ -224,19 +227,34 @@ int main(int argc, char** argv) {
         /* Override the color if the attribute is already there. Otherwise a
            new attribute gets added to the attributes array below */
         bool hasColorAttribute = false;
-        if(forceColor && material->hasAttribute(Trade::MaterialAttribute::BaseColor)) {
+        if(forceColor) {
+          if(material->hasAttribute(Trade::MaterialAttribute::BaseColor)) {
             hasColorAttribute = true;
             material->mutableAttribute<Color4>(Trade::MaterialAttribute::BaseColor) = *forceColor;
+          }
+        /* If it's a Phong material (an OBJ), make sure BaseColor is set
+           instead below */
+        // TODO some compat for this? Assimp should have something, a similar
+        //  feature got reverted in 5.1
+        } else if(material->hasAttribute(Trade::MaterialAttribute::DiffuseColor)) {
+          forceColor = material->attribute<Color4>(Trade::MaterialAttribute::DiffuseColor);
         }
 
         /* Not calling releaseAttributeData() yet either, as we need to ask
            hasAttribute() first */
         Containers::Array<Trade::MaterialAttributeData> attributes;
         // TODO findAttributeId()!
-        if(material->hasAttribute(Trade::MaterialAttribute::BaseColorTexture)) {
+        if(material->hasAttribute(Trade::MaterialAttribute::BaseColorTexture) ||
+           material->hasAttribute(Trade::MaterialAttribute::DiffuseTexture)) {
           Debug{} << "New textured material for" << meshNames[transformationMeshMaterial.first()] << "in" << Utility::Path::split(filename).second();
 
-          UnsignedInt& textureId = material->mutableAttribute<UnsignedInt>(Trade::MaterialAttribute::BaseColorTexture);
+          const bool hasBaseColorTexture = material->hasAttribute(Trade::MaterialAttribute::BaseColorTexture);
+
+          UnsignedInt& textureId = material->mutableAttribute<UnsignedInt>(
+            hasBaseColorTexture ?
+              Trade::MaterialAttribute::BaseColorTexture :
+              Trade::MaterialAttribute::DiffuseTexture
+          );
 
           Containers::Optional<Trade::TextureData> texture = importer->texture(textureId);
           CORRADE_INTERNAL_ASSERT(texture && texture->type() == Trade::TextureType::Texture2D);
@@ -247,11 +265,19 @@ int main(int argc, char** argv) {
           textureId = 0;
           CORRADE_INTERNAL_ASSERT(material->layerCount() == 1);
           attributes = material->releaseAttributeData();
+          /* If there's DiffuseTexture, add a BaseColorTexture instead */
+          if(!hasBaseColorTexture)
+            arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColorTexture, 0u);
           arrayAppend(attributes, InPlaceInit, "baseColorTextureLayer", UnsignedInt(inputImages.size() + 1));
 
-          // TODO add texture scaling if the image is smaller than 2K
+          Containers::Optional<Trade::ImageData2D> image = importer->image2D(texture->image());
+          CORRADE_INTERNAL_ASSERT((image->size() <= TextureAtlasSize).all());
+          /* Add texture scaling if the image is smaller than 2K */
+          if((image->size() < TextureAtlasSize).any())
+            arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColorTextureMatrix,
+            Matrix3::scaling(Vector2(image->size())/Vector2(TextureAtlasSize)));
 
-          arrayAppend(inputImages, *importer->image2D(texture->image()));
+          arrayAppend(inputImages, *std::move(image));
 
         /* Otherwise make it reference the first (white) image layer and make
            it just Flat */
@@ -354,14 +380,12 @@ int main(int argc, char** argv) {
   /* A combined 3D image. First layer is fully white for input meshes that have
      no textures. */
   Trade::ImageData3D image{PixelFormat::RGB8Unorm,
-    // TODO don't hardcode max image size (goes onto the same pile as shitty
-    //  "atlasing")
-    {2048, 2048, Int(inputImages.size() + 1)},
-    Containers::Array<char>{NoInit, 2048*2048*(inputImages.size() + 1)*4}};
+    {TextureAtlasSize, Int(inputImages.size() + 1)},
+    Containers::Array<char>{NoInit, TextureAtlasSize.product()*(inputImages.size() + 1)*4}};
   /* Fill the first layer white */
   constexpr char white[]{'\xff'};
   Utility::copy(
-    Containers::StridedArrayView3D<const char>{white, {2048, 2048, 3}, {0, 0, 0}},
+    Containers::StridedArrayView3D<const char>{white, {TextureAtlasSize.x(), TextureAtlasSize.y(), 3}, {0, 0, 0}},
     image.mutablePixels()[0]);
   /* Copy the other images */
   for(std::size_t i = 0; i != inputImages.size(); ++i) {
