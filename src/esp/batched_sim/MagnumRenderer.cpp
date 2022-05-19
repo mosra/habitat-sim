@@ -421,16 +421,26 @@ std::size_t MagnumRenderer::add(const Mn::UnsignedInt sceneId, const Cr::Contain
   CORRADE_ASSERT(found != _state->meshViewRangeForName.end(),
     "MagnumRenderer::add(): name" << name << "not found", {});
 
-  /* Add the whole hierarchy under this name */
+  /* Add a top-level object */
   const std::size_t id = scene.transformations.size();
+  // TODO this adds an empty draw, which is useless; do better (separate
+  //  transforms from draws)
+  arrayAppend(scene.parents, -1);
+  arrayAppend(scene.transformations, transformation);
+  arrayAppend(scene.absoluteTransformations, Cr::InPlaceInit);
+  arrayAppend(scene.draws, Cr::InPlaceInit)
+    .setMaterialId(0);
+  arrayAppend(scene.textureTransformations, Cr::InPlaceInit)
+    .setLayer(0);
+  arrayAppend(scene.drawCommands, Cr::InPlaceInit, 0u, 0u);
+
+  /* Add the whole hierarchy under this name */
   for(std::size_t i = found->second.first(); i != found->second.second(); ++i) {
     const MeshView& meshView = _state->meshViews[i];
     /* The following meshes are children of the first one, inheriting its
        transformation */
-    arrayAppend(scene.parents,
-      i == found->second.first() ? -1 : -1); // TODO here should be id, but that doesn't work, why??
-    arrayAppend(scene.transformations,
-      (i == found->second.first() ? transformation : Mn::Matrix4{})*meshView.transformation);
+    arrayAppend(scene.parents, id);
+    arrayAppend(scene.transformations, meshView.transformation);
 
     /* The actual absolute transformation will get filled each time draw() is
        called */
