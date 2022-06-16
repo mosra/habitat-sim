@@ -268,7 +268,7 @@ int main(int argc, char** argv) {
           /* If there's DiffuseTexture, add a BaseColorTexture instead */
           if(!hasBaseColorTexture)
             arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColorTexture, 0u);
-          arrayAppend(attributes, InPlaceInit, "baseColorTextureLayer", UnsignedInt(inputImages.size() + 1));
+          arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColorTextureLayer, UnsignedInt(inputImages.size() + 1));
 
           Containers::Optional<Trade::ImageData2D> image = importer->image2D(texture->image());
           CORRADE_INTERNAL_ASSERT((image->size() <= TextureAtlasSize).all());
@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
           attributes = material->releaseAttributeData();
           arrayAppend(attributes, {
             Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTexture, 0u},
-            Trade::MaterialAttributeData{"baseColorTextureLayer", 0u}
+            Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTextureLayer, 0u}
           });
         }
 

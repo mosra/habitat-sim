@@ -141,7 +141,6 @@ struct MagnumRenderer::State {
      draw list. */
   // TODO have the materials deduplicated, and then this should have a layer
   //  for each mesh view instead
-  // TODO also the scale + offset, once we have non-shitty atlasing
   Cr::Containers::Array<TextureTransformation> textureTransformations;
 
   /* Pairs of mesh views (index byte offset and count), material IDs and
@@ -229,6 +228,14 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
             importerPlugin.contains("AnySceneImporter")) {
     importer->configuration().setValue("ignoreRequiredExtensions", true);
     importer->configuration().setValue("experimentalKhrTextureKtx", true);
+
+    /* Desired imported types for custom glTF scene fields. If the group
+       doesn't exist (which is the case for AnySceneImporter), add it first */
+    Cr::Utility::ConfigurationGroup* types = importer->configuration().group("customSceneFieldTypes");
+    if(!types) types = importer->configuration().addGroup("customSceneFieldTypes");
+    types->addValue("meshViewIndexOffset", "UnsignedInt");
+    types->addValue("meshViewIndexCount", "UnsignedInt");
+    types->addValue("meshViewMaterial", "Int");
   }
 
   if(Cr::PluginManager::PluginMetadata* const metadata = manager.metadata("BasisImporter")) {
@@ -294,8 +301,7 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
         "MagnumRenderer::addFile(): expected material" << i << "to reference the only texture, got" << flatMaterial.texture(), );
 
       _state->textureTransformations[i] = {
-        // TODO builtin attribute for this
-        flatMaterial.attribute<Mn::UnsignedInt>("baseColorTextureLayer"_s),
+        flatMaterial.attribute<Mn::UnsignedInt>(Mn::Trade::MaterialAttribute::BaseColorTextureLayer),
         // TODO fix gltf converter to flip texcoords (ffs!!)
         flatMaterial.hasTextureTransformation() ? Mn::Matrix3::translation(Mn::Vector2::yAxis(1.0f))*Mn::Matrix3::scaling(Mn::Vector2::yScale(-1.0f))*flatMaterial.textureMatrix()*Mn::Matrix3::translation(Mn::Vector2::yAxis(1.0f))*Mn::Matrix3::scaling(Mn::Vector2::yScale(-1.0f)) : Mn::Matrix3{}
       };
@@ -329,31 +335,12 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
     /* SceneData and copy() will assert if the types or sizes don't match, so
        we don't have to */
     _state->meshViews = Cr::Containers::Array<MeshView>{Cr::NoInit, scene->fieldSize(*meshViewIndexCountFieldId)};
-    if(importerPlugin.contains("BpsImporter")) {
-      Cr::Utility::copy(scene->field<Mn::UnsignedInt>(*meshViewIndexOffsetFieldId),
-        stridedArrayView(_state->meshViews).slice(&MeshView::indexOffsetInBytes));
-      Cr::Utility::copy(scene->field<Mn::UnsignedInt>(*meshViewIndexCountFieldId),
-        stridedArrayView(_state->meshViews).slice(&MeshView::indexCount));
-      Cr::Utility::copy(scene->field<Mn::Int>(*meshViewMaterialFieldId),
-        stridedArrayView(_state->meshViews).slice(&MeshView::materialId));
-    } else {
-      // TODO implement parsing ints in the importer
-      Mn::Math::castInto(
-        // TODO make stridedArrayView implicitly convertible to higher
-        //  dimensions, like images
-        Cr::Containers::arrayCast<2, const Mn::Double>(scene->field<Mn::Double>(*meshViewIndexOffsetFieldId)),
-        Cr::Containers::arrayCast<2, Mn::UnsignedInt>(stridedArrayView(_state->meshViews).slice(&MeshView::indexOffsetInBytes)));
-      Mn::Math::castInto(
-        // TODO make stridedArrayView implicitly convertible to higher
-        //  dimensions, like images
-        Cr::Containers::arrayCast<2, const Mn::Double>(scene->field<Mn::Double>(*meshViewIndexCountFieldId)),
-        Cr::Containers::arrayCast<2, Mn::UnsignedInt>(stridedArrayView(_state->meshViews).slice(&MeshView::indexCount)));
-      Mn::Math::castInto(
-        // TODO make stridedArrayView implicitly convertible to higher
-        //  dimensions, like images
-        Cr::Containers::arrayCast<2, const Mn::Double>(scene->field<Mn::Double>(*meshViewMaterialFieldId)),
-        Cr::Containers::arrayCast<2, Mn::Int>(stridedArrayView(_state->meshViews).slice(&MeshView::materialId)));
-    }
+    Cr::Utility::copy(scene->field<Mn::UnsignedInt>(*meshViewIndexOffsetFieldId),
+      stridedArrayView(_state->meshViews).slice(&MeshView::indexOffsetInBytes));
+    Cr::Utility::copy(scene->field<Mn::UnsignedInt>(*meshViewIndexCountFieldId),
+      stridedArrayView(_state->meshViews).slice(&MeshView::indexCount));
+    Cr::Utility::copy(scene->field<Mn::Int>(*meshViewMaterialFieldId),
+      stridedArrayView(_state->meshViews).slice(&MeshView::materialId));
     /* Transformations of all objects in the scene. Objects that don't have
        this field default to an indentity transform. */
     Cr::Containers::Array<Mn::Matrix4> transformations{scene->mappingBound()};
