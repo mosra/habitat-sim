@@ -375,7 +375,7 @@ int main(int argc, char** argv) {
   for(const Trade::MeshData& inputMesh: inputMeshes)
     arrayAppend(inputMeshReferences, inputMesh);
   MeshTools::concatenateInto(mesh, inputMeshReferences);
-  CORRADE_INTERNAL_ASSERT(converter->add(mesh));
+  CORRADE_INTERNAL_ASSERT_OUTPUT(converter->add(mesh));
 
   /* A combined 3D image. First layer is fully white for input meshes that have
      no textures. */
@@ -403,10 +403,10 @@ int main(int argc, char** argv) {
   /* Clear the original images array to relieve the memory pressure a bit --
      Basis is HUNGRY */
   inputImages = {};
-  CORRADE_INTERNAL_ASSERT(converter->add(image));
+  CORRADE_INTERNAL_ASSERT_OUTPUT(converter->add(image));
 
   /* And a texture referencing the only image */
-  CORRADE_INTERNAL_ASSERT(converter->add(Trade::TextureData{Trade::TextureType::Texture2DArray,
+  CORRADE_INTERNAL_ASSERT_OUTPUT(converter->add(Trade::TextureData{Trade::TextureType::Texture2DArray,
     SamplerFilter::Linear, SamplerFilter::Linear, SamplerMipmap::Linear,
     SamplerWrapping::Repeat, 0}));
 
@@ -448,7 +448,7 @@ int main(int argc, char** argv) {
       outputMeshes.slice(&Mesh::mapping),
       outputMeshes.slice(&Mesh::meshMaterial)}
   }};
-  CORRADE_INTERNAL_ASSERT(converter->add(scene));
+  CORRADE_INTERNAL_ASSERT_OUTPUT(converter->add(scene));
 
   return converter->endFile() ? 0 : 1;
 }
