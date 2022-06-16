@@ -435,16 +435,13 @@ int main(int argc, char** argv) {
     Trade::SceneFieldData{Trade::SceneField::Mesh,
       outputMeshes.slice(&Mesh::mapping),
       outputMeshes.slice(&Mesh::mesh)},
-    Trade::SceneFieldData{
-                SceneFieldMeshViewIndexOffset,
+    Trade::SceneFieldData{SceneFieldMeshViewIndexOffset,
       outputMeshes.slice(&Mesh::mapping),
       outputMeshes.slice(&Mesh::meshIndexOffset)},
-    Trade::SceneFieldData{
-                SceneFieldMeshViewIndexCount,
+    Trade::SceneFieldData{SceneFieldMeshViewIndexCount,
       outputMeshes.slice(&Mesh::mapping),
       outputMeshes.slice(&Mesh::meshIndexCount)},
-    Trade::SceneFieldData{
-                SceneFieldMeshViewMaterial,
+    Trade::SceneFieldData{SceneFieldMeshViewMaterial,
       outputMeshes.slice(&Mesh::mapping),
       outputMeshes.slice(&Mesh::meshMaterial)}
   }};
