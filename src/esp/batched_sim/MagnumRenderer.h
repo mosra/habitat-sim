@@ -13,7 +13,7 @@
 namespace esp { namespace batched_sim {
 
 enum class MagnumRendererFlag {
-  NoTextures = 1 << 0,
+  NoTextures = 1 << 0
   // TODO memory-map
 };
 typedef Corrade::Containers::EnumSet<MagnumRendererFlag> MagnumRendererFlags;
@@ -25,8 +25,6 @@ struct MagnumRendererConfiguration {
 
   MagnumRendererConfiguration& setFlags(MagnumRendererFlags flags);
   MagnumRendererConfiguration& setTileSizeCount(const Magnum::Vector2i& tileSize, const Magnum::Vector2i& tileCount);
-  // TODO drop
-  MagnumRendererConfiguration& setTextureArrayMaxLevelSize(Magnum::UnsignedInt size);
 
   struct State;
   Corrade::Containers::Pointer<State> state;
@@ -68,6 +66,7 @@ class MagnumRenderer {
     /* used by MagnumRendererStandalone */
     explicit MagnumRenderer(Magnum::NoCreateT);
     void create(const MagnumRendererConfiguration& configuration);
+    void destroy();
 
   private:
     struct State;

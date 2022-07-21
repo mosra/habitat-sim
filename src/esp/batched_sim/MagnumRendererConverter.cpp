@@ -16,7 +16,9 @@
 #include <Magnum/Math/Matrix3.h>
 #include <Magnum/Math/Matrix4.h>
 #include <Magnum/MeshTools/Concatenate.h>
+#include <Magnum/MeshTools/RemoveDuplicates.h>
 #include <Magnum/SceneTools/FlattenMeshHierarchy.h>
+#include <Magnum/TextureTools/Atlas.h>
 #include <Magnum/Trade/AbstractImporter.h>
 #include <Magnum/Trade/AbstractImageConverter.h>
 #include <Magnum/Trade/AbstractSceneConverter.h>
@@ -69,10 +71,24 @@ int main(int argc, char** argv) {
   if(PluginManager::PluginMetadata* m = imageConverterManager.metadata("BasisImageConverter")) {
     // TODO set up once GltfSceneConverter uses it directly
   }
+  if(PluginManager::PluginMetadata* m = converterManager.metadata("GltfSceneConverter")) {
+    // TODO fix the damn texcoord orientation in the converter already
+    m->configuration().setValue("orientation", "rdo");
+  }
 
-  /* Magnum's OBJ importer is ... well, not great. It'll get replaced eventually. */
+  /* Magnum's OBJ importer is ... well, not great. It'll get replaced
+     eventually. */
   if(importerManager.loadState("ObjImporter") != PluginManager::LoadState::NotFound)
     importerManager.setPreferredPlugins("ObjImporter", {"AssimpImporter"});
+
+  /* Use StbImageImporter because for it we can override channel count */
+  {
+    PluginManager::PluginMetadata* m = importerManager.metadata("StbImageImporter");
+    CORRADE_INTERNAL_ASSERT(m);
+    m->configuration().setValue("forceChannelCount", 3);
+    importerManager.setPreferredPlugins("PngImporter", {"StbImageImporter"});
+    importerManager.setPreferredPlugins("JpegImporter", {"StbImageImporter"});
+  }
 
   Containers::Pointer<Trade::AbstractImporter> importer = importerManager.loadAndInstantiate("AnySceneImporter");
   Containers::Pointer<Trade::AbstractSceneConverter> converter = converterManager.loadAndInstantiate(args.value("converter"));
@@ -87,10 +103,23 @@ int main(int argc, char** argv) {
   converter->setSceneFieldName(SceneFieldMeshViewIndexCount, "meshViewIndexCount");
   converter->setSceneFieldName(SceneFieldMeshViewMaterial, "meshViewMaterial");
 
-  /* Materials are put into the file directly, meshes and textures get
-     collected and then joined. */
+  /* Meshes and textures get collected, then joined / packed, then added to the
+     converter */
   Containers::Array<Trade::MeshData> inputMeshes;
   Containers::Array<Trade::ImageData2D> inputImages;
+
+  /* Reserve the first image for texture-less objects -- a single white pixel */
+  constexpr Color3ub WhitePixel[]{0xffffff_rgb};
+  arrayAppend(inputImages, Trade::ImageData2D{
+    PixelStorage{}.setAlignment(1),
+    PixelFormat::RGB8Unorm, {1, 1},
+    Trade::DataFlags{}, WhitePixel});
+
+  /* As textures get packed into an atlas, the materials will need to be
+     updated with final layer IDs and offsets. Store them temporarily in an
+     array, using the imported image index and zero offset as placeholders. */
+  Containers::Array<Trade::MaterialData> inputMaterials;
+
   UnsignedInt indexOffset = 0;
 
   /* Parent, present for all objects */
@@ -118,6 +147,46 @@ int main(int argc, char** argv) {
   };
   Containers::Array<Mesh> meshes;
 
+  const auto importSingleMesh = [&](
+    Containers::StringView filename
+  ) {
+    CORRADE_INTERNAL_ASSERT_OUTPUT(importer->openFile(filename));
+    CORRADE_INTERNAL_ASSERT(importer->meshCount() == 1);
+
+    Parent root;
+    root.mapping = parents.size();
+    root.parent = -1;
+
+    arrayAppend(parents, root);
+    converter->setObjectName(root.mapping,
+      Utility::Path::splitExtension(Utility::Path::split(filename).second()).first());
+
+    Containers::Optional<Trade::MeshData> mesh = importer->mesh(0);
+    CORRADE_INTERNAL_ASSERT(mesh && mesh->primitive() == MeshPrimitive::Triangles);
+    /* Assumin STL files, which are not indexed and thus with many duplicate
+       vertices. Create an index buffer by deduplicating them. */
+    // TODO possibly useful to filter and recreate normals also?
+    mesh = MeshTools::removeDuplicates(*mesh);
+
+    Mesh m;
+    m.mapping = root.mapping;
+    m.mesh = 0;
+    m.meshIndexCount = mesh->indexCount();
+    m.meshMaterial = inputMaterials.size();
+    m.meshIndexOffset = indexOffset;
+    indexOffset += mesh->indexCount()*4; // TODO ints hardcoded
+
+    /* Add an empty white material */
+    arrayAppend(inputMaterials, Trade::MaterialData{Trade::MaterialType::Flat, {
+      Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTexture, 0u},
+      Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTextureLayer, 0u},
+      Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTextureMatrix,
+        Matrix3::scaling(Vector2{1}/Vector2(TextureAtlasSize))}
+    }});
+
+    arrayAppend(meshes, m);
+  };
+
   const auto import = [&](
     Containers::StringView filename,
     Containers::StringView name = {},
@@ -141,6 +210,7 @@ int main(int argc, char** argv) {
 
     /* Meshes are unfortunately named in a useless way, so override them with
        names from the objects referencing them instead */
+    // TODO this is replica-specific, make a dedicated function
     Containers::Array<Containers::String> meshNames{importer->meshCount()};
     for(Containers::Pair<UnsignedInt, Containers::Pair<UnsignedInt, Int>> objectMeshMaterial: scene->meshesMaterialsAsArray()) {
       const UnsignedInt meshId = objectMeshMaterial.second().first();
@@ -162,6 +232,16 @@ int main(int argc, char** argv) {
        top-level object. */
     for(Containers::Triple<UnsignedInt, Int, Matrix4> transformationMeshMaterial: SceneTools::flattenMeshHierarchy3D(*scene)) {
       Containers::Optional<Trade::MeshData> mesh = importer->mesh(transformationMeshMaterial.first());
+      Containers::String meshName = meshNames[transformationMeshMaterial.first()];
+
+      /* Skip non-triangle meshes */
+      if(mesh->primitive() != MeshPrimitive::Triangles &&
+         mesh->primitive() != MeshPrimitive::TriangleFan &&
+         mesh->primitive() != MeshPrimitive::TriangleStrip) {
+        Warning{} << "Mesh" << meshName << "in" << Utility::Path::split(filename).second() << "is" << mesh->primitive() << Debug::nospace << ", skipping";
+        continue;
+      }
+
       // TODO convert from a strip/... if not triangles
       CORRADE_INTERNAL_ASSERT(mesh && mesh->isIndexed() && mesh->primitive() == MeshPrimitive::Triangles);
 
@@ -189,7 +269,6 @@ int main(int argc, char** argv) {
       // TODO avoid string copies by making the map over StringViews? but then
       //  it'd have to be changed again once we don't have the extra meshNames
       //  array
-      Containers::String meshName = meshNames[transformationMeshMaterial.first()];
       bool duplicate = false;
       if(uniqueMeshes) {
         std::unordered_map<Containers::String, Containers::Pair<UnsignedInt, UnsignedInt>>::iterator found = uniqueMeshes->find(meshName);
@@ -268,9 +347,10 @@ int main(int argc, char** argv) {
           /* If there's DiffuseTexture, add a BaseColorTexture instead */
           if(!hasBaseColorTexture)
             arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColorTexture, 0u);
-          arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColorTextureLayer, UnsignedInt(inputImages.size() + 1));
+          arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColorTextureLayer, UnsignedInt(inputImages.size()));
 
           Containers::Optional<Trade::ImageData2D> image = importer->image2D(texture->image());
+          // TODO detection of single-color images here
           CORRADE_INTERNAL_ASSERT((image->size() <= TextureAtlasSize).all());
           /* Add texture scaling if the image is smaller than 2K */
           if((image->size() < TextureAtlasSize).any())
@@ -279,15 +359,17 @@ int main(int argc, char** argv) {
 
           arrayAppend(inputImages, *std::move(image));
 
-        /* Otherwise make it reference the first (white) image layer and make
-           it just Flat */
+        /* Otherwise make it reference the first image, which is a 1x1 white
+           pixel */
         } else {
           Debug{} << "New untextured material for" << meshNames[transformationMeshMaterial.first()] << "in" << Utility::Path::split(filename).second();
 
           attributes = material->releaseAttributeData();
           arrayAppend(attributes, {
             Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTexture, 0u},
-            Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTextureLayer, 0u}
+            Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTextureLayer, 0u},
+            Trade::MaterialAttributeData{Trade::MaterialAttribute::BaseColorTextureMatrix,
+              Matrix3::scaling(Vector2{1}/Vector2(TextureAtlasSize))}
           });
         }
 
@@ -295,9 +377,11 @@ int main(int argc, char** argv) {
           arrayAppend(attributes, InPlaceInit, Trade::MaterialAttribute::BaseColor, *forceColor);
         }
 
+        /* Make it just Flat */
         material = Trade::MaterialData{Trade::MaterialType::Flat, std::move(attributes)};
 
-        importedMaterialIds[transformationMeshMaterial.second()] = m.meshMaterial = *converter->add(*material);
+        importedMaterialIds[transformationMeshMaterial.second()] = m.meshMaterial = inputMaterials.size();
+        arrayAppend(inputMaterials, *std::move(material));
       }
 
       arrayAppend(meshes, m);
@@ -313,9 +397,84 @@ int main(int argc, char** argv) {
     {"arm0.link_el0.obj", 0x3f3f3f_rgbf},
     {"arm0.link_el1.obj", 0xffff00_rgbf},
     {"arm0.link_fngr.obj", 0x7f7f7f_rgbf},
-    // TODO yeyeyeye ... bored
+    {"arm0.link_hr0.obj", 0xffff00_rgbf},
+    {"arm0.link_sh0.obj", 0x3f3f3f_rgbf},
+    {"arm0.link_sh1.obj", 0x7f7f7f_rgbf},
+    {"arm0.link_wr0.obj", 0x3f3f3f_rgbf},
+    {"arm0.link_wr1.obj", 0xffff00_rgbf},
+    {"base.obj", 0x4cc6ff_rgbf},
+    {"fl.hip.obj", 0x3f3f3f_rgbf},
+    {"fl.lleg.obj", 0x3f3f3f_rgbf},
+    {"fl.uleg.obj", 0x4cc6ff_rgbf},
+    {"fr.hip.obj", 0x3f3f3f_rgbf},
+    {"fr.lleg.obj", 0x3f3f3f_rgbf},
+    {"fr.uleg.obj", 0x4cc6ff_rgbf},
+    {"hl.hip.obj", 0x3f3f3f_rgbf},
+    {"hl.lleg.obj", 0x3f3f3f_rgbf},
+    {"hl.uleg.obj", 0x4cc6ff_rgbf},
+    {"hr.hip.obj", 0x3f3f3f_rgbf},
+    {"hr.lleg.obj", 0x3f3f3f_rgbf},
+    {"hr.uleg.obj", 0x4cc6ff_rgbf}
   })
     import(Utility::Path::join(spotPath, i.first()), {}, i.second());
+
+  /* ReplicaCAD articulated objects */
+  // TODO this needs the images deduplicated ... some content-addressing
+  //  file callback?
+  Containers::String replicaArticulatedObjectsPath = Utility::Path::join(args.value("input"), "ReplicaCAD_baked_lighting_v1.5/urdf_uncompressed");
+  for(const char* filename: {
+    "fridge/body_brighter2.glb", // TODO "fixed" model instead
+    "fridge/bottom_door_brighter2.glb", // TODO "fixed"
+    "fridge/top_door_brighter2.glb", // TODO "fixed"
+    "kitchen_counter/kitchen_counter.glb",
+    "kitchen_counter/drawer1.glb",
+    "kitchen_counter/drawer2.glb",
+    "kitchen_counter/drawer3.glb",
+    "kitchen_counter/drawer4.glb",
+    "kitchen_cupboards/kitchencupboard_base.glb",
+    "kitchen_cupboards/kitchencupboard_doorWhole_L.glb",
+    "kitchen_cupboards/kitchencupboard_doorWhole_R.glb",
+    "kitchen_cupboards/kitchencupboard_doorWindow_L.glb",
+    "kitchen_cupboards/kitchencupboard_doorWindow_R.glb",
+    "doors/door2.glb",
+    "cabinet/cabinet.glb",
+    "cabinet/door.glb",
+    "chest_of_drawers/chestOfDrawers_base.glb", // TODO "fixed"
+    "chest_of_drawers/chestOfDrawers_DrawerBot.glb", // TODO "fixed"
+    "chest_of_drawers/chestOfDrawers_DrawerMid.glb", // TODO "fixed"
+    "chest_of_drawers/chestOfDrawers_DrawerTop.glb" // TODO "fixed"
+  })
+    import(Utility::Path::join(replicaArticulatedObjectsPath, filename));
+
+  /* Fetch */
+  // TODO there was some "preprocessed_fetch_meshes" glb file instead
+  Containers::String fetchPath = Utility::Path::join(args.value("input"), "hab_fetch_v1.0/meshes");
+  for(const char* filename: {
+//     "base_link.dae", // TODO it's a 4K texture, FFS
+    "elbow_flex_link.dae",
+    "forearm_roll_link.dae",
+    "gripper_link.dae",
+    "head_pan_link.dae",
+    "head_tilt_link.dae",
+    "shoulder_lift_link.dae",
+    "shoulder_pan_link.dae",
+    "torso_fixed_link.dae",
+    "torso_lift_link.dae",
+    "upperarm_roll_link.dae",
+    "wrist_flex_link.dae",
+    "wrist_roll_link.dae"
+  })
+    import(Utility::Path::join(fetchPath, filename));
+  for(const char* filename: {
+    "bellows_link.STL",
+    "estop_link.STL", // TODO or .dae?
+    "l_wheel_link.STL",
+    "l_gripper_finger_link_opt.stl",
+    "laser_link.STL",
+    "r_gripper_finger_link_opt.stl",
+    "r_wheel_link.STL",
+  })
+    importSingleMesh(Utility::Path::join(fetchPath, filename));
 
   /* Debug models */
   // TODO generate these all from Primitives instead of doing crazy stuff with
@@ -338,18 +497,6 @@ int main(int argc, char** argv) {
   })
     import(Utility::Path::join(debugModelsPath, filename));
 
-  /* ReplicaCAD */
-  Containers::String replicaPath = Utility::Path::join(args.value("input"), "ReplicaCAD_baked_lighting_v1.5/stages_uncompressed");
-  std::unordered_map<Containers::String, Containers::Pair<UnsignedInt, UnsignedInt>> uniqueReplicaMeshes;
-  for(std::size_t i = 0; i <= 4; ++i) {
-    for(std::size_t j = 0; j <= 20; ++j) {
-      import(
-        Utility::Path::join(replicaPath, Utility::format("Baked_sc{}_staging_{:.2}.glb", i, j)),
-        {}, {},
-        &uniqueReplicaMeshes);
-    }
-  }
-
   /* YCB */
   Containers::String ycbPath = Utility::Path::join(args.value("input"), "hab_ycb_v1.1/ycb/");
   for(const char* name: {
@@ -365,6 +512,18 @@ int main(int argc, char** argv) {
   })
     import(Utility::Path::join({ycbPath, name, "google_16k/textured.obj"}), name);
 
+  /* ReplicaCAD */
+  Containers::String replicaPath = Utility::Path::join(args.value("input"), "ReplicaCAD_baked_lighting_v1.5/stages_uncompressed");
+  std::unordered_map<Containers::String, Containers::Pair<UnsignedInt, UnsignedInt>> uniqueReplicaMeshes;
+  for(std::size_t i = 0; i <= 4; ++i) {
+    for(std::size_t j = 0; j <= 20; ++j) {
+      import(
+        Utility::Path::join(replicaPath, Utility::format("Baked_sc{}_staging_{:.2}.glb", i, j)),
+        {}, {},
+        &uniqueReplicaMeshes);
+    }
+  }
+
   /* Target layout for the mesh. So far just for flat rendering, no normals
      etc */
   Trade::MeshData mesh{MeshPrimitive::Triangles, nullptr, {
@@ -375,30 +534,61 @@ int main(int argc, char** argv) {
   for(const Trade::MeshData& inputMesh: inputMeshes)
     arrayAppend(inputMeshReferences, inputMesh);
   MeshTools::concatenateInto(mesh, inputMeshReferences);
+  for(Vector2& i: mesh.mutableAttribute<Vector2>(Trade::MeshAttribute::TextureCoordinates)) {
+    // TODO remmove this once GltfSceneConverter does that itself
+    i.y() = 1.0f - i.y();
+  }
   CORRADE_INTERNAL_ASSERT_OUTPUT(converter->add(mesh));
 
-  /* A combined 3D image. First layer is fully white for input meshes that have
-     no textures. */
+  /* Pack input images into an atlas */
+  Containers::Pair<Int, Containers::Array<Vector3i>> layerCountOffsets =
+    TextureTools::atlasArrayPowerOfTwo(TextureAtlasSize, Containers::StridedArrayView1D<const Trade::ImageData2D>(inputImages).slice(&Trade::ImageData2D::size));
+
+  /* Update layer and offset info in the materials, add them to the converter */
+  for(Trade::MaterialData& inputMaterial: inputMaterials) {
+    UnsignedInt& layer = inputMaterial.mutableAttribute<UnsignedInt>(Trade::MaterialAttribute::BaseColorTextureLayer);
+    const UnsignedInt imageId = layer;
+
+    layer = layerCountOffsets.second()[imageId].z();
+
+    /* If the material has a texture matrix (textures that are same as atlas
+       layer size don't have it), update the offset there */
+    // TODO findMaterial()!!
+    if(inputMaterial.hasAttribute(Trade::MaterialAttribute::BaseColorTextureMatrix)) {
+      Matrix3& matrix = inputMaterial.mutableAttribute<Matrix3>(Trade::MaterialAttribute::BaseColorTextureMatrix);
+      matrix = Matrix3::translation(Vector2{layerCountOffsets.second()[imageId].xy()}/Vector2{TextureAtlasSize})*matrix;
+    }
+
+    CORRADE_INTERNAL_ASSERT_OUTPUT(converter->add(inputMaterial));
+  }
+
+  /* A combined 3D image */
   Trade::ImageData3D image{PixelFormat::RGB8Unorm,
-    {TextureAtlasSize, Int(inputImages.size() + 1)},
-    Containers::Array<char>{NoInit, TextureAtlasSize.product()*(inputImages.size() + 1)*4}};
-  /* Fill the first layer white */
-  constexpr char white[]{'\xff'};
-  Utility::copy(
-    Containers::StridedArrayView3D<const char>{white, {TextureAtlasSize.x(), TextureAtlasSize.y(), 3}, {0, 0, 0}},
-    image.mutablePixels()[0]);
-  /* Copy the other images */
+    {TextureAtlasSize, layerCountOffsets.first()},
+    Containers::Array<char>{NoInit, std::size_t(TextureAtlasSize.product()*layerCountOffsets.first()*3)}};
+  /* Copy the images to their respective locations, calculate waste ratio
+     during the process */
+  std::size_t inputImageArea = 0;
   for(std::size_t i = 0; i != inputImages.size(); ++i) {
+    inputImageArea += inputImages[i].size().product();
+    // TODO handle RGBA (drop alpha), or convert everything to RGBA instead
     CORRADE_INTERNAL_ASSERT(inputImages[i].format() == PixelFormat::RGB8Unorm);
     Utility::copy(inputImages[i].pixels(),
-      // TODO did i mention the "atlas packing" is EXTREMELY SHITTY?
-      image.mutablePixels()[i + 1].prefix({
+      /** @todo sliceCount(), finally */
+      image.mutablePixels()[layerCountOffsets.second()[i].z()].exceptPrefix({
+        // TODO have implicit conversion of Vector to StridedDimensions, FINALLY
+        std::size_t(layerCountOffsets.second()[i].x()),
+        std::size_t(layerCountOffsets.second()[i].y()),
+        0
+      }).prefix({
         // TODO have implicit conversion of Vector to StridedDimensions, FINALLY
         std::size_t(inputImages[i].size().x()),
         std::size_t(inputImages[i].size().y()),
         std::size_t(inputImages[i].pixelSize())
       }));
   }
+
+  Debug{} << inputImages.size() << "images packed to" << layerCountOffsets.first() << "layers," << Utility::format("{:.2f}", 100.0f - 100.0f*inputImageArea/(TextureAtlasSize.product()*layerCountOffsets.first())) << Debug::nospace << "% area wasted";
 
   /* Clear the original images array to relieve the memory pressure a bit --
      Basis is HUNGRY */

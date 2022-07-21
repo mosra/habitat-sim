@@ -14,7 +14,7 @@ endif()
 # BpsImporter plugin
 if(MAGNUM_RENDERER)
   find_package(Corrade REQUIRED PluginManager)
-  find_package(Magnum REQUIRED GL GlfwApplication SceneTools Trade MeshTools Shaders DebugTools WindowlessEglApplication)
+  find_package(Magnum REQUIRED GL GlfwApplication SceneTools Trade MeshTools Shaders TextureTools DebugTools WindowlessEglApplication)
   if(MAGNUM_BUILD_STATIC)
     find_package(MagnumPlugins REQUIRED BasisImporter)
     corrade_add_static_plugin(BpsImporter ";" BpsImporter.conf BpsImporter.cpp)
@@ -115,7 +115,8 @@ if(MAGNUM_RENDERER)
   target_link_libraries(MagnumRendererConverter PRIVATE
     Magnum::SceneTools
     Magnum::Trade
-    Magnum::MeshTools)
+    Magnum::MeshTools
+    Magnum::TextureTools)
   if(MAGNUM_BUILD_STATIC)
     target_link_libraries(MagnumRendererConverter PRIVATE
       Magnum::AnySceneImporter

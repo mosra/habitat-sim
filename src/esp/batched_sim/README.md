@@ -23,8 +23,18 @@ magnum-imageconverter -D3 --map -C BasisImageConverter \
   yay.0.ktx2 yay.0.basis.ktx2
 ```
 
-Takes about 25 minutes and 12 GB RAM on a 8-core laptop from 2018. Once done,
-rename the output back to `yay.0.ktx2`. Now the input glTF is Basis-compressed.
+Takes about 25 minutes and 12 GB RAM on a 8-core laptop from 2018. That might
+be extremely unbearable for quick iterations, so alternatively you can encode
+directly to DXT1 which will take about 8 seconds and 1.7 GB RAM:
+
+```sh
+magnum-imageconverter -D3 --map -C StbDxtImageConverter \
+  -c highQuality \
+  yay.0.ktx2 yay.0.dxt.ktx2
+```
+
+Once done, rename the output back to `yay.0.ktx2`. Now the input glTF is
+Basis- or DXT-compressed.
 
 # Running the demo
 

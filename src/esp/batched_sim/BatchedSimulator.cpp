@@ -1387,9 +1387,11 @@ BatchedSimulator::BatchedSimulator(const BatchedSimulatorConfig& config) {
 //     .setFilename("combined_Stage_v3_sc0_staging_trimesh.bps"_s)
     .setTileSizeCount({config_.sensor0.width, config_.sensor0.height},
                       // TODO better way to specify this
-                      {16, (config_.numEnvs + 15)/16})
+                      {16, (config_.numEnvs + 15)/16}),
+    MagnumRendererStandaloneConfiguration{}
+      .setCudaDevice(config_.gpuId)
   );
-  // TODO GPU ID, if include depth/color
+  // TODO if include depth/color
   renderer_->addFile(config_.renderAssetCompositeFilepath);
 //   #ifdef MAGNUM_RENDERER
 //   /* Hardcode camera position + projection for all views (taken from

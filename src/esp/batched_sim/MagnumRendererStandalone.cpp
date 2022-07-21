@@ -6,6 +6,7 @@
 
 #include <Corrade/Containers/Optional.h>
 #include <Corrade/Containers/StridedArrayView.h>
+#include <Magnum/Image.h>
 #include <Magnum/PixelFormat.h>
 #include <Magnum/GL/BufferImage.h>
 #include <Magnum/GL/Framebuffer.h>
@@ -23,10 +24,28 @@ namespace Mn = Magnum;
 
 namespace esp { namespace batched_sim {
 
+struct MagnumRendererStandaloneConfiguration::State {
+  /* Not picking any CUDA device by default */
+  Magnum::UnsignedInt cudaDevice = ~Magnum::UnsignedInt{};
+  MagnumRendererStandaloneFlags flags;
+};
+
+MagnumRendererStandaloneConfiguration::MagnumRendererStandaloneConfiguration(): state{Cr::InPlaceInit} {}
+MagnumRendererStandaloneConfiguration::~MagnumRendererStandaloneConfiguration() = default;
+
+MagnumRendererStandaloneConfiguration& MagnumRendererStandaloneConfiguration::setCudaDevice(Magnum::UnsignedInt id) {
+  state->cudaDevice = id;
+  return *this;
+}
+
+MagnumRendererStandaloneConfiguration& MagnumRendererStandaloneConfiguration::setFlags(MagnumRendererStandaloneFlags flags) {
+  state->flags = flags;
+  return *this;
+}
+
 struct MagnumRendererStandalone::State {
   Mn::Platform::WindowlessGLContext context;
   Mn::Platform::GLContext magnumContext{Mn::NoCreate};
-  Cr::Containers::Optional<MagnumRenderer> renderer;
   Mn::GL::Renderbuffer color{Mn::NoCreate}, depth{Mn::NoCreate};
   Mn::GL::Framebuffer framebuffer{Mn::NoCreate};
   Mn::GL::BufferImage2D colorBuffer{Mn::NoCreate};
@@ -34,10 +53,14 @@ struct MagnumRendererStandalone::State {
   cudaGraphicsResource* cudaColorBuffer{};
   cudaGraphicsResource* cudaDepthBuffer{};
 
-  State(): context{Mn::Platform::WindowlessGLContext::Configuration{}
-    .setCudaDevice(0)} {
+  State(const MagnumRendererStandaloneConfiguration& configuration): context{Mn::Platform::WindowlessGLContext::Configuration{}
+    .setCudaDevice(configuration.state->cudaDevice)
+    .addFlags(configuration.state->flags & MagnumRendererStandaloneFlag::QuietLog ? Mn::Platform::WindowlessGLContext::Configuration::Flag::QuietLog : Mn::Platform::WindowlessGLContext::Configuration::Flags{})
+  } {
       context.makeCurrent();
-      magnumContext.create();
+      magnumContext.create(Mn::GL::Context::Configuration{}
+        .addFlags(configuration.state->flags & MagnumRendererStandaloneFlag::QuietLog ? Mn::GL::Context::Configuration::Flag::QuietLog : Mn::GL::Context::Configuration::Flags{})
+      );
       color = Mn::GL::Renderbuffer{};
       depth = Mn::GL::Renderbuffer{};
   }
@@ -51,40 +74,55 @@ struct MagnumRendererStandalone::State {
   }
 };
 
-MagnumRendererStandalone::MagnumRendererStandalone(const MagnumRendererConfiguration& configuration): MagnumRenderer{Mn::NoCreate}, _state{Cr::InPlaceInit} {
+MagnumRendererStandalone::MagnumRendererStandalone(const MagnumRendererConfiguration& configuration, const MagnumRendererStandaloneConfiguration& standaloneConfiguration): MagnumRenderer{Mn::NoCreate}, _state{Cr::InPlaceInit, standaloneConfiguration} {
   /* Create the renderer only once the GL context is ready */
   create(configuration);
 
-  const Mn::Vector2i size = _state->renderer->tileSize()*_state->renderer->tileCount();
+  const Mn::Vector2i size = tileSize()*tileCount();
   _state->color.setStorage(Mn::GL::RenderbufferFormat::RGBA8, size);
   _state->depth.setStorage(Mn::GL::RenderbufferFormat::DepthComponent32F, size);
   _state->framebuffer = Mn::GL::Framebuffer{Mn::Range2Di{{}, size}};
   _state->framebuffer
     .attachRenderbuffer(Mn::GL::Framebuffer::ColorAttachment{0}, _state->color)
-    // TODO just GL::Framebuffer::DepthAttachment, this is shit
     .attachRenderbuffer(Mn::GL::Framebuffer::BufferAttachment::Depth, _state->depth);
   /* Defer the buffer initialization to the point when it's actually read
      into */
-  _state->colorBuffer = Mn::GL::BufferImage2D{framebufferColorFormat()};
-  _state->depthBuffer = Mn::GL::BufferImage2D{framebufferDepthFormat()};
+  _state->colorBuffer = Mn::GL::BufferImage2D{colorFramebufferFormat()};
+  _state->depthBuffer = Mn::GL::BufferImage2D{depthFramebufferFormat()};
 }
 
-MagnumRendererStandalone::~MagnumRendererStandalone() = default;
+MagnumRendererStandalone::~MagnumRendererStandalone() {
+  /* Yup, shitty, but as we hold the GL context we can't let any GL resources
+     to be destructed after our destructor. Better ideas? */
+  MagnumRenderer::destroy();
+}
 
-Mn::PixelFormat MagnumRendererStandalone::framebufferColorFormat() const {
+Mn::PixelFormat MagnumRendererStandalone::colorFramebufferFormat() const {
   return Mn::PixelFormat::RGBA8Unorm;
 }
 
-Mn::PixelFormat MagnumRendererStandalone::framebufferDepthFormat() const {
+Mn::PixelFormat MagnumRendererStandalone::depthFramebufferFormat() const {
   return Mn::PixelFormat::Depth32F;
 }
 
 void MagnumRendererStandalone::draw() {
   _state->framebuffer.clear(Mn::GL::FramebufferClear::Color|Mn::GL::FramebufferClear::Depth);
-  _state->renderer->draw(_state->framebuffer);
+  MagnumRenderer::draw(_state->framebuffer);
 }
 
-const void* MagnumRendererStandalone::cudaColorBufferDevicePointer() {
+Mn::Image2D MagnumRendererStandalone::colorImage() {
+  /* Not using _state->framebuffer.viewport() as it's left pointing to whatever
+     tile was rendered last */
+  return _state->framebuffer.read({{}, tileCount()*tileSize()}, colorFramebufferFormat());
+}
+
+Mn::Image2D MagnumRendererStandalone::depthImage() {
+  /* Not using _state->framebuffer.viewport() as it's left pointing to whatever
+     tile was rendered last */
+  return _state->framebuffer.read({{}, tileCount()*tileSize()}, depthFramebufferFormat());
+}
+
+const void* MagnumRendererStandalone::colorCudaBufferDevicePointer() {
   /* If the CUDA buffer exists already, it's mapped from the previous call.
      Unmap it first so we can read into it from GL. */
   if(_state->cudaColorBuffer)
@@ -109,7 +147,7 @@ const void* MagnumRendererStandalone::cudaColorBufferDevicePointer() {
   return pointer;
 }
 
-const void* MagnumRendererStandalone::cudaDepthBufferDevicePointer() {
+const void* MagnumRendererStandalone::depthCudaBufferDevicePointer() {
   /* If the CUDA buffer exists already, it's mapped from the previous call.
      Unmap it first so we can read into it from GL. */
   if(_state->cudaDepthBuffer)

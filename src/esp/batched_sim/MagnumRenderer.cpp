@@ -64,9 +64,8 @@ using namespace Cr::Containers::Literals;
 
 struct MagnumRendererConfiguration::State {
   MagnumRendererFlags flags;
-  Magnum::Vector2i tileSize{128, 128};
-  Magnum::Vector2i tileCount{16, 12};
-  Magnum::UnsignedInt textureArrayMaxLevelSize{128};
+  Mn::Vector2i tileSize{128, 128};
+  Mn::Vector2i tileCount{16, 12};
 };
 
 MagnumRendererConfiguration::MagnumRendererConfiguration(): state{Cr::InPlaceInit} {}
@@ -76,13 +75,10 @@ MagnumRendererConfiguration& MagnumRendererConfiguration::setFlags(MagnumRendere
   state->flags = flags;
   return *this;
 }
-MagnumRendererConfiguration& MagnumRendererConfiguration::setTileSizeCount(const Magnum::Vector2i& tileSize, const Magnum::Vector2i& tileCount) {
+
+MagnumRendererConfiguration& MagnumRendererConfiguration::setTileSizeCount(const Mn::Vector2i& tileSize, const Mn::Vector2i& tileCount) {
   state->tileSize = tileSize;
   state->tileCount = tileCount;
-  return *this;
-}
-MagnumRendererConfiguration& MagnumRendererConfiguration::setTextureArrayMaxLevelSize(Magnum::UnsignedInt size) {
-  state->textureArrayMaxLevelSize = size;
   return *this;
 }
 
@@ -133,14 +129,12 @@ struct MagnumRenderer::State {
   Mn::Vector2i tileSize, tileCount;
   Mn::Shaders::PhongGL shader{Mn::NoCreate};
 
-  /* Filled at the beginning */
+  /* Filled upon addFile() */
   Mn::GL::Texture2DArray texture{Mn::NoCreate};
   Mn::GL::Mesh mesh{Mn::NoCreate};
   Mn::GL::Buffer materialUniform;
-  /* Contains texture layer for each material. Used by add() to populate the
-     draw list. */
-  // TODO have the materials deduplicated, and then this should have a layer
-  //  for each mesh view instead
+  /* Contains texture transform and layer for each material. Used by add() to
+     populate the draw list. */
   Cr::Containers::Array<TextureTransformation> textureTransformations;
 
   /* Pairs of mesh views (index byte offset and count), material IDs and
@@ -158,7 +152,7 @@ struct MagnumRenderer::State {
   Cr::Containers::Array<Scene> scenes;
 };
 
-MagnumRenderer::MagnumRenderer(Magnum::NoCreateT) {};
+MagnumRenderer::MagnumRenderer(Mn::NoCreateT) {}
 
 void MagnumRenderer::create(const MagnumRendererConfiguration& configurationWrapper) {
   #ifdef MAGNUM_BUILD_STATIC
@@ -183,6 +177,10 @@ void MagnumRenderer::create(const MagnumRendererConfiguration& configurationWrap
   // TODO move this outside
   Mn::GL::Renderer::enable(Mn::GL::Renderer::Feature::FaceCulling);
   Mn::GL::Renderer::enable(Mn::GL::Renderer::Feature::DepthTest);
+}
+
+void MagnumRenderer::destroy() {
+  _state = {};
 }
 
 MagnumRenderer::~MagnumRenderer() = default;
@@ -217,15 +215,10 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
   Cr::Containers::Pointer<Mn::Trade::AbstractImporter> importer = manager.loadAndInstantiate(importerPlugin);
   CORRADE_INTERNAL_ASSERT(importer);
 
-  if(importerPlugin.contains("BpsImporter")) {
-    // TODO why dafuq is this not propagated from BasisImporter config??
-    importer->configuration().setValue("basisFormat", "Astc4x4RGBA");
-    importer->configuration().setValue("meshViews", true);
-    importer->configuration().setValue("instanceScene", false);
-    importer->configuration().setValue("textureArrays", true);
-    importer->configuration().setValue("textureArraysForceAllMaterialsTextured", true);
-  } else if(importerPlugin.contains("GltfImporter") ||
-            importerPlugin.contains("AnySceneImporter")) {
+  /* Set up options for glTF import. We can also import any other files (such
+     as serialized magnum blobs or BPS files), assume these don't need any
+     custom setup. */
+  if(importerPlugin.contains("GltfImporter") || (importerPlugin.contains("AnySceneImporter") && (filename.contains(".gltf") || filename.contains(".glb")))) {
     importer->configuration().setValue("ignoreRequiredExtensions", true);
     importer->configuration().setValue("experimentalKhrTextureKtx", true);
 
@@ -238,8 +231,10 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
     types->addValue("meshViewMaterial", "Int");
   }
 
+  /* Basis options. Don't want to bother with all platform variations right
+     now, so it's always ASTC, sorry. */
   if(Cr::PluginManager::PluginMetadata* const metadata = manager.metadata("BasisImporter")) {
-    metadata->configuration().setValue("format", "Astc4x4RGBA"); // TODO
+    metadata->configuration().setValue("format", "Astc4x4RGBA");
   }
 
   // TODO memory-map self-contained files (have a config option? do implicitly
@@ -282,10 +277,8 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
     "MagnumRenderer::addFile(): expected a file with exactly one mesh, got" << importer->meshCount(), );
   _state->mesh = Mn::MeshTools::compile(*CORRADE_INTERNAL_ASSERT_EXPRESSION(importer->mesh(0)));
 
-  /* Immutable material data. Save layers to a temporary array to apply
-     them to draws instead */
-  // TODO have a step that deduplicates materials and puts the layer to the
-  //  scene instead
+  /* Immutable material data. Save texture transformations and layers to a
+     temporary array to apply them to draws instead */
   _state->textureTransformations = Cr::Containers::Array<TextureTransformation>{Cr::DefaultInit, importer->materialCount()};
   {
     Cr::Containers::Array<Mn::Shaders::PhongMaterialUniform> materialData{Cr::DefaultInit, importer->materialCount()};
@@ -302,8 +295,7 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
 
       _state->textureTransformations[i] = {
         flatMaterial.attribute<Mn::UnsignedInt>(Mn::Trade::MaterialAttribute::BaseColorTextureLayer),
-        // TODO fix gltf converter to flip texcoords (ffs!!)
-        flatMaterial.hasTextureTransformation() ? Mn::Matrix3::translation(Mn::Vector2::yAxis(1.0f))*Mn::Matrix3::scaling(Mn::Vector2::yScale(-1.0f))*flatMaterial.textureMatrix()*Mn::Matrix3::translation(Mn::Vector2::yAxis(1.0f))*Mn::Matrix3::scaling(Mn::Vector2::yScale(-1.0f)) : Mn::Matrix3{}
+        flatMaterial.hasTextureTransformation() ? flatMaterial.textureMatrix() : Mn::Matrix3{}
       };
     }
 
@@ -355,22 +347,6 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
       _state->meshViews[i].transformation = transformations[meshViewMapping[i]];
     }
 
-//     /* Populate name mapping. Assuming all three fields have it the same. */
-//     for(std::size_t i = 0; i != mapping.size(); ++i) {
-//       Cr::Containers::String name = importer->objectName(mapping[i]);
-//       CORRADE_ASSERT(name, "MagnumRenderer::addFile(): node" << i << "has no name", );
-//       // TODO this will get an actual range once we fetch the whole hierarchy
-//       //  for each name
-//       // TODO fetch parents and transformations, order their mapping
-//       //  depth-first (orderParentsDepthFirst()) so each top-level object has
-//       //  its children next to itself, then populate / reshuffle the mesh views
-//       //  to match this mapping (how!?), and ultimately fill
-//       //  meshViewRangeForName only with names of top-level objects (with
-//       //  parent = -1) and the child count (i.e., # of elements until another
-//       //  -1 parent)
-//       _state->meshViewRangeForName.insert({name, {Mn::UnsignedInt(i), Mn::UnsignedInt(i + 1)}});
-//     }
-
     /* Templates are the root objects with their names. Their immediate
        children are the actual meshes. Assumes the order matches the order of
        the custom fields. */
@@ -398,7 +374,8 @@ void MagnumRenderer::addFile(const Cr::Containers::StringView filename, const Cr
     Mn::Shaders::PhongGL::Flag::TextureArrays|
     Mn::Shaders::PhongGL::Flag::TextureTransformation;
   // TODO 1024 is 64K divided by 64 bytes needed for one draw uniform, have
-  //  that fetched from actual GL limits instead
+  //  that fetched from actual GL limits instead once I get to actually
+  //  splitting draws by this limit
   _state->shader = Mn::Shaders::PhongGL{flags, 0, importer->materialCount(), 1024};
   _state->shader
     .bindMaterialBuffer(_state->materialUniform);
@@ -490,17 +467,19 @@ Cr::Containers::StridedArrayView1D<Mn::Matrix4> MagnumRenderer::transformations(
 }
 
 void MagnumRenderer::draw(Mn::GL::AbstractFramebuffer& framebuffer) {
+  // TODO allow this (currently addFile() sets up shader limits)
+  CORRADE_ASSERT(_state->mesh.id(),
+    "MagnumRenderer::draw(): no file was added", );
+
   /* Calculate absolute transformations */
   for(std::size_t sceneId = 0; sceneId != _state->scenes.size(); ++sceneId) {
     Scene& scene = _state->scenes[sceneId];
 
     // TODO have a tool for this
     scene.absoluteTransformations[0].setTransformationMatrix(Mn::Matrix4{});
-//     if(sceneId == 0) !Mn::Debug{} << stridedArrayView(scene.transformations).slice(&Mn::Matrix4::translation);
     for(std::size_t i = 0; i != scene.transformations.size(); ++i)
       scene.absoluteTransformations[i + 1].setTransformationMatrix(
         scene.absoluteTransformations[scene.parents[i] + 1].transformationMatrix *scene.transformations[i]);
-//     if(sceneId == 0) !Mn::Debug{} << stridedArrayView(scene.absoluteTransformations).slice(&Mn::Shaders::TransformationUniform3D::transformationMatrix).slice(&Mn::Matrix4::translation);
   }
 
   /* Upload projection and transformation uniforms, assuming they change every
@@ -508,7 +487,6 @@ void MagnumRenderer::draw(Mn::GL::AbstractFramebuffer& framebuffer) {
   _state->projectionUniform.setData(_state->projections);
   for(std::size_t sceneId = 0; sceneId != _state->scenes.size(); ++sceneId)
     // TODO have this somehow in a single buffer instead
-    // TODO needs arrayInsert(), heh
     _state->scenes[sceneId].transformationUniform.setData(_state->scenes[sceneId].absoluteTransformations.exceptPrefix(1));
 
   for(Mn::Int y = 0; y != _state->tileCount.y(); ++y) {
@@ -516,11 +494,6 @@ void MagnumRenderer::draw(Mn::GL::AbstractFramebuffer& framebuffer) {
       framebuffer.setViewport(Mn::Range2Di::fromSize(Mn::Vector2i{x, y}*_state->tileSize, _state->tileSize));
 
       const std::size_t scene = y*_state->tileCount.x() + x;
-
-//       !Debug{} << scene << _state->scenes[scene].textureTransformations
-
-      // TODO bind the actual view
-      // TODO what is the above TODO about, actually?!
 
       // TODO split by draw count limit
       _state->shader

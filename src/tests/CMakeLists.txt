@@ -1,5 +1,5 @@
 find_package(Magnum REQUIRED DebugTools AnyImageConverter)
-find_package(MagnumPlugins REQUIRED StbImageImporter)
+find_package(MagnumPlugins REQUIRED StbImageImporter OPTIONAL_COMPONENTS GltfSceneConverter)
 
 # needed for BatchedSimulator
 set(CMAKE_CXX_STANDARD 17)
@@ -14,6 +14,12 @@ macro(TEST TEST_NAME)
   endforeach()
   add_test(${TEST_NAME} ${TEST_NAME})
 endmacro(TEST)
+
+# If the GltfSceneConverter is present, the new Magnum SceneConverter APIs are
+# as well. Which enables a data-generating test case in MagnumRendererTest
+if(MagnumPlugins_GltfSceneConverter_FOUND)
+  set(HAS_MAGNUM_GLTFSCENECONVERTER ON)
+endif()
 
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/configure.h.cmake ${CMAKE_CURRENT_BINARY_DIR}/configure.h
@@ -58,6 +64,10 @@ target_include_directories(PhysicsTest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 test(GfxReplayTest assets gfx sim)
 target_include_directories(GfxReplayTest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+corrade_add_test(MagnumRendererTest MagnumRendererTest.cpp
+    LIBRARIES batched_sim Magnum::DebugTools)
+target_include_directories(MagnumRendererTest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 test(ResourceManagerTest assets)
 target_include_directories(ResourceManagerTest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
